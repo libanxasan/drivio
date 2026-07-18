@@ -1,0 +1,14 @@
+import 'dart:async';
+
+/// Minimal asynchronous mutex.
+class AsyncMutex {
+  Future<void> _tail = Future<void>.value();
+
+  /// Runs one operation after previously queued operations.
+  Future<T> protect<T>(Future<T> Function() action) {
+    final completer = Completer<void>();
+    final previous = _tail;
+    _tail = completer.future;
+    return previous.then((_) => action()).whenComplete(completer.complete);
+  }
+}
