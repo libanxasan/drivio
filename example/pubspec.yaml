@@ -1,0 +1,15 @@
+name: driving_telemetry_example
+description: Example application for driving_telemetry.
+publish_to: none
+
+environment:
+  sdk: '>=3.4.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  driving_telemetry:
+    path: ../
+
+flutter:
+  uses-material-design: true
