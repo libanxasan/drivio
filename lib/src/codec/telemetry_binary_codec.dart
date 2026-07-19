@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import '../model/axis_statistics.dart';
@@ -29,7 +30,7 @@ class TelemetryBinaryCodec {
     writer.writeString(chunk.chunkId);
     writer.writeVarUint(chunk.chunkIndex);
     writer.writeVarUint(chunk.startedAtMillis);
-    writer.writeVarUint(chunk.endedAtMillis - chunk.startedAtMillis);
+    writer.writeVarUint(math.max(0, chunk.endedAtMillis - chunk.startedAtMillis));
 
     _writeLocations(writer, chunk.locations, chunk.startedAtMillis);
     _writeFrames(writer, chunk.motionFrames, chunk.startedAtMillis);
@@ -54,7 +55,11 @@ class TelemetryBinaryCodec {
       throw FormatException('Unsupported telemetry schema version: $version.');
     }
 
-    final type = TelemetryChunkType.values[reader.readVarUint()];
+    final typeIndex = reader.readVarUint();
+    if (typeIndex >= TelemetryChunkType.values.length) {
+      throw FormatException('Unknown telemetry chunk type: $typeIndex.');
+    }
+    final type = TelemetryChunkType.values[typeIndex];
     final tripId = reader.readString();
     final chunkId = reader.readString();
     final chunkIndex = reader.readVarUint();
@@ -87,7 +92,11 @@ class TelemetryBinaryCodec {
     var previousLatitude = 0;
     var previousLongitude = 0;
     for (final value in values) {
-      writer.writeVarUint(value.timestampMillis - previousTime);
+      // Timestamps must be non-decreasing in the delta encoding. Clamping
+      // keeps one out-of-order sample from failing the entire chunk; the
+      // tracked previous value stays in sync with what a decoder rebuilds.
+      final timeDelta = math.max(0, value.timestampMillis - previousTime);
+      writer.writeVarUint(timeDelta);
       writer.writeVarInt(value.latitudeE7 - previousLatitude);
       writer.writeVarInt(value.longitudeE7 - previousLongitude);
       writer.writeVarUint((value.speedMps * 100).round().clamp(0, 1000000).toInt());
@@ -105,7 +114,7 @@ class TelemetryBinaryCodec {
         (value.headingAccuracyDegrees * 100).round().clamp(0, 36000).toInt(),
       );
       writer.writeByte(value.isMocked ? 1 : 0);
-      previousTime = value.timestampMillis;
+      previousTime += timeDelta;
       previousLatitude = value.latitudeE7;
       previousLongitude = value.longitudeE7;
     }
@@ -159,8 +168,8 @@ class TelemetryBinaryCodec {
   ) {
     writer.writeVarUint(values.length);
     for (final value in values) {
-      writer.writeVarUint(value.startedAtMillis - chunkStartMillis);
-      writer.writeVarUint(value.durationMillis);
+      writer.writeVarUint(math.max(0, value.startedAtMillis - chunkStartMillis));
+      writer.writeVarUint(math.max(0, value.durationMillis));
       _writeAxis(writer, value.longitudinalAcceleration);
       _writeAxis(writer, value.lateralAcceleration);
       _writeAxis(writer, value.verticalAcceleration);
@@ -223,10 +232,11 @@ class TelemetryBinaryCodec {
     writer.writeVarUint(values.length);
     var previousMicros = chunkStartMillis * 1000;
     for (final value in values) {
-      writer.writeVarUint(value.timestampMicros - previousMicros);
+      final delta = math.max(0, value.timestampMicros - previousMicros);
+      writer.writeVarUint(delta);
       _writeVector(writer, value.userAcceleration);
       _writeVector(writer, value.gyroscope);
-      previousMicros = value.timestampMicros;
+      previousMicros += delta;
     }
   }
 
@@ -274,8 +284,8 @@ class TelemetryBinaryCodec {
     for (final value in values) {
       writer.writeString(value.id);
       writer.writeVarUint(value.type.index);
-      writer.writeVarUint(value.startedAtMillis - chunkStartMillis);
-      writer.writeVarUint(value.durationMillis);
+      writer.writeVarUint(math.max(0, value.startedAtMillis - chunkStartMillis));
+      writer.writeVarUint(math.max(0, value.durationMillis));
       writer.writeVarUint((value.confidence * 1000).round().clamp(0, 1000).toInt());
       writer.writeVarInt((value.minimumValue * _motionScale).round());
       writer.writeVarInt((value.maximumValue * _motionScale).round());
@@ -291,17 +301,19 @@ class TelemetryBinaryCodec {
       writer.writeVarUint(flags);
 
       if ((flags & 1) != 0) {
-        writer.writeVarUint((value.speedBeforeMps! * 100).round());
+        writer.writeVarUint(math.max(0, (value.speedBeforeMps! * 100).round()));
       }
       if ((flags & 2) != 0) {
-        writer.writeVarUint((value.speedAfterMps! * 100).round());
+        writer.writeVarUint(math.max(0, (value.speedAfterMps! * 100).round()));
       }
       if ((flags & 4) != 0) {
         writer.writeVarInt((value.latitude! * 10000000).round());
         writer.writeVarInt((value.longitude! * 10000000).round());
       }
       if ((flags & 8) != 0) {
-        writer.writeVarUint((value.effectiveSpeedLimitKph! * 100).round());
+        writer.writeVarUint(
+          math.max(0, (value.effectiveSpeedLimitKph! * 100).round()),
+        );
       }
       if ((flags & 16) != 0) writer.writeString(value.evidenceChunkId!);
       if ((flags & 32) != 0) writer.writeString(jsonEncode(value.metadata));
@@ -315,7 +327,11 @@ class TelemetryBinaryCodec {
     final count = reader.readVarUint();
     return List<TelemetryEventCandidate>.generate(count, (_) {
       final id = reader.readString();
-      final type = TelemetryEventType.values[reader.readVarUint()];
+      final typeIndex = reader.readVarUint();
+      if (typeIndex >= TelemetryEventType.values.length) {
+        throw FormatException('Unknown telemetry event type: $typeIndex.');
+      }
+      final type = TelemetryEventType.values[typeIndex];
       final startedAt = chunkStartMillis + reader.readVarUint();
       final duration = reader.readVarUint();
       final confidence = reader.readVarUint() / 1000;
@@ -364,8 +380,10 @@ class TelemetryBinaryCodec {
     writer.writeByte(value == null ? 0 : 1);
     if (value == null) return;
     writer.writeVarUint(value.hourStartedAtMillis);
-    writer.writeVarUint(value.hourEndedAtMillis - value.hourStartedAtMillis);
-    writer.writeVarUint(value.distanceMeters.round());
+    writer.writeVarUint(
+      math.max(0, value.hourEndedAtMillis - value.hourStartedAtMillis),
+    );
+    writer.writeVarUint(math.max(0, value.distanceMeters.round()));
     writer.writeVarUint(value.movingDurationMillis);
     _writeAxis(writer, value.speed);
     _writeAxis(writer, value.longitudinalAcceleration);
@@ -395,8 +413,11 @@ class TelemetryBinaryCodec {
     final eventCount = reader.readVarUint();
     final events = <TelemetryEventType, int>{};
     for (var index = 0; index < eventCount; index++) {
-      events[TelemetryEventType.values[reader.readVarUint()]] =
-          reader.readVarUint();
+      final typeIndex = reader.readVarUint();
+      if (typeIndex >= TelemetryEventType.values.length) {
+        throw FormatException('Unknown telemetry event type: $typeIndex.');
+      }
+      events[TelemetryEventType.values[typeIndex]] = reader.readVarUint();
     }
     return HourlyTelemetryAggregate(
       hourStartedAtMillis: start,

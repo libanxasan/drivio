@@ -1,13 +1,30 @@
 /// Candidate event types retained for backend validation.
 enum TelemetryEventType {
+  /// Sustained longitudinal acceleration above the configured threshold.
   harshAccelerationCandidate,
+
+  /// Sustained longitudinal deceleration below the configured threshold.
   harshBrakingCandidate,
+
+  /// Combined high lateral acceleration and yaw rate.
   swervingCandidate,
+
+  /// Moderate lateral acceleration and yaw rate at speed.
   abruptLaneChangeCandidate,
+
+  /// Speed above the effective limit plus tolerance.
   speedingCandidate,
+
+  /// Externally detected wrong-way travel.
   wrongWayCandidate,
+
+  /// Externally detected signalized intersection crossing.
   signalizedIntersectionCrossingCandidate,
+
+  /// Strong device rotation at low vehicle speed.
   phoneMovement,
+
+  /// Degraded or mocked GPS signal.
   gpsQualityLoss,
 }
 

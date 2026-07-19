@@ -1,7 +1,19 @@
 import 'telemetry_chunk.dart';
 
 /// Local upload status.
-enum ChunkUploadStatus { pending, uploading, uploaded, failed }
+enum ChunkUploadStatus {
+  /// Not yet uploaded.
+  pending,
+
+  /// An upload attempt is in progress.
+  uploading,
+
+  /// Acknowledged by the backend.
+  uploaded,
+
+  /// The most recent upload attempt failed.
+  failed,
+}
 
 /// Persisted chunk metadata.
 class StoredTelemetryChunk {

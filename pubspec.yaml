@@ -1,6 +1,6 @@
 name: driving_telemetry
 description: Compact driving telemetry collection, local persistence, route matching, and reliable backend synchronization for Flutter.
-version: 0.1.0
+version: 0.1.1
 
 publish_to: none
 

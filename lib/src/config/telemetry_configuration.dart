@@ -1,7 +1,16 @@
 import '../model/vector3_value.dart';
 
 /// Maps device sensor axes into vehicle-relative axes.
-enum SensorAxis { x, y, z }
+enum SensorAxis {
+  /// Device x axis.
+  x,
+
+  /// Device y axis.
+  y,
+
+  /// Device z axis.
+  z,
+}
 
 /// A device axis and its sign.
 class SignedSensorAxis {
@@ -75,25 +84,44 @@ class TelemetryConfiguration {
     this.minimumSpeedingDuration = const Duration(seconds: 5),
     this.retainContinuousChunksAfterUpload = false,
     this.retainEventEvidenceAfterUpload = true,
-  })  : assert(motionSamplingPeriod > Duration.zero),
-        assert(motionFrameDuration > Duration.zero),
-        assert(locationDistanceFilterMeters >= 0),
+  })  : assert(locationDistanceFilterMeters >= 0),
         assert(maximumLocationAccuracyMeters > 0),
         assert(maximumPlausibleSpeedKph > 0),
-        assert(chunkMaximumDuration > Duration.zero),
         assert(chunkMaximumEstimatedBytes > 0),
-        assert(eventEvidenceBefore >= Duration.zero),
-        assert(eventEvidenceAfter >= Duration.zero),
-        assert(motionRingBufferDuration > Duration.zero),
         assert(harshAccelerationThresholdMps2 > 0),
         assert(harshBrakingThresholdMps2 < 0),
         assert(highLateralAccelerationThresholdMps2 > 0),
         assert(highYawRateThresholdRadS > 0),
         assert(minimumManeuverSpeedKph >= 0),
-        assert(minimumEventDuration > Duration.zero),
-        assert(eventCooldown >= Duration.zero),
-        assert(speedingToleranceKph >= 0),
-        assert(minimumSpeedingDuration > Duration.zero);
+        assert(speedingToleranceKph >= 0);
+
+  /// Throws [ArgumentError] when a duration setting is out of range.
+  ///
+  /// Duration comparisons cannot run inside const constructor asserts, so
+  /// consumers such as [DrivingTelemetryRecorder] call this at runtime.
+  void validate() {
+    void requirePositive(Duration value, String name) {
+      if (value <= Duration.zero) {
+        throw ArgumentError.value(value, name, 'Must be greater than zero.');
+      }
+    }
+
+    void requireNonNegative(Duration value, String name) {
+      if (value < Duration.zero) {
+        throw ArgumentError.value(value, name, 'Must not be negative.');
+      }
+    }
+
+    requirePositive(motionSamplingPeriod, 'motionSamplingPeriod');
+    requirePositive(motionFrameDuration, 'motionFrameDuration');
+    requirePositive(chunkMaximumDuration, 'chunkMaximumDuration');
+    requireNonNegative(eventEvidenceBefore, 'eventEvidenceBefore');
+    requireNonNegative(eventEvidenceAfter, 'eventEvidenceAfter');
+    requirePositive(motionRingBufferDuration, 'motionRingBufferDuration');
+    requirePositive(minimumEventDuration, 'minimumEventDuration');
+    requireNonNegative(eventCooldown, 'eventCooldown');
+    requirePositive(minimumSpeedingDuration, 'minimumSpeedingDuration');
+  }
 
   /// Requested sensor sampling period.
   final Duration motionSamplingPeriod;

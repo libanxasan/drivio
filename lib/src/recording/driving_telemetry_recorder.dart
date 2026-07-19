@@ -25,7 +25,22 @@ import 'location_source.dart';
 import 'motion_source.dart';
 
 /// Recorder state.
-enum TelemetryRecorderState { idle, starting, recording, stopping, disposed }
+enum TelemetryRecorderState {
+  /// No trip is active.
+  idle,
+
+  /// A trip is being started.
+  starting,
+
+  /// A trip is being recorded.
+  recording,
+
+  /// A trip is being stopped and persisted.
+  stopping,
+
+  /// The recorder has been disposed and can no longer be used.
+  disposed,
+}
 
 /// Raw telemetry recorder with no scoring logic.
 class DrivingTelemetryRecorder {
@@ -48,7 +63,9 @@ class DrivingTelemetryRecorder {
         _locationRing = TimeRingBuffer<LocationSample>(
           capacity: configuration.motionRingBufferDuration,
           timestampMillis: (value) => value.timestampMillis,
-        );
+        ) {
+    configuration.validate();
+  }
 
   /// Durable local storage.
   final TelemetryStore store;
@@ -161,13 +178,45 @@ class DrivingTelemetryRecorder {
       _state = TelemetryRecorderState.recording;
       return resolvedTripId;
     } catch (_) {
+      await _stopSources();
+      _tripId = null;
+      _startedAtMillis = null;
+      _chunkStartedAtMillis = null;
       _state = TelemetryRecorderState.idle;
-      await _motionSubscription?.cancel();
-      await _locationSubscription?.cancel();
-      _motionSubscription = null;
-      _locationSubscription = null;
       rethrow;
     }
+  }
+
+  /// Cancels subscriptions and stops both sources, reporting rather than
+  /// throwing teardown errors so buffered telemetry can still be persisted.
+  Future<void> _stopSources() async {
+    final subscriptions = <StreamSubscription<Object?>?>[
+      _motionSubscription,
+      _locationSubscription,
+    ];
+    _motionSubscription = null;
+    _locationSubscription = null;
+    for (final subscription in subscriptions) {
+      try {
+        await subscription?.cancel();
+      } catch (error) {
+        _reportError(error);
+      }
+    }
+    try {
+      await motionSource.stop();
+    } catch (error) {
+      _reportError(error);
+    }
+    try {
+      await locationSource.stop();
+    } catch (error) {
+      _reportError(error);
+    }
+  }
+
+  void _reportError(Object error) {
+    if (!_errorController.isClosed) _errorController.add(error);
   }
 
   /// Updates the effective limit used only to detect a candidate speeding window.
@@ -191,13 +240,20 @@ class DrivingTelemetryRecorder {
     }
     _state = TelemetryRecorderState.stopping;
 
-    await motionSource.stop();
-    await locationSource.stop();
-    await _motionSubscription?.cancel();
-    await _locationSubscription?.cancel();
-    _motionSubscription = null;
-    _locationSubscription = null;
+    await _stopSources();
 
+    try {
+      return await _finishTrip();
+    } finally {
+      _state = TelemetryRecorderState.idle;
+      _tripId = null;
+      _startedAtMillis = null;
+      _chunkStartedAtMillis = null;
+      _resetRuntimeBuffers();
+    }
+  }
+
+  Future<TelemetryTripResult> _finishTrip() async {
     final endedAt = DateTime.now().toUtc().millisecondsSinceEpoch;
     final partialFrame = _motionAggregator.flush();
     if (partialFrame != null) _registerFrame(partialFrame);
@@ -233,7 +289,7 @@ class DrivingTelemetryRecorder {
         );
       } catch (error) {
         routeError = error.toString();
-        if (!_errorController.isClosed) _errorController.add(error);
+        _reportError(error);
       }
     }
 
@@ -273,7 +329,7 @@ class DrivingTelemetryRecorder {
 
     final manifest = await store.readManifest(_tripId!);
     final pending = await store.pendingChunkCount(_tripId!);
-    final result = TelemetryTripResult(
+    return TelemetryTripResult(
       tripId: _tripId!,
       startedAtMillis: _startedAtMillis!,
       endedAtMillis: endedAt,
@@ -286,19 +342,14 @@ class DrivingTelemetryRecorder {
       osrmMatch: osrmMatch,
       routeProcessingError: routeError,
     );
-
-    _state = TelemetryRecorderState.idle;
-    _tripId = null;
-    _startedAtMillis = null;
-    _chunkStartedAtMillis = null;
-    _resetRuntimeBuffers();
-    return result;
   }
 
   /// Runs one backend synchronization pass.
+  ///
+  /// Returns null when no [synchronizer] was supplied.
   Future<TelemetrySyncResult?> synchronizePendingData({
     int? maximumChunks,
-  }) {
+  }) async {
     return synchronizer?.synchronize(maximumChunks: maximumChunks);
   }
 
@@ -404,21 +455,32 @@ class DrivingTelemetryRecorder {
     EventEvidenceCapture capture, {
     int? actualEndedAtMillis,
   }) {
+    // The chunk start must not exceed any captured sample timestamp, or the
+    // delta encoding would fail. GPS fixes can carry timestamps earlier than
+    // the nominal evidence window, for example a cached first fix.
+    var start = math.max(
+      _startedAtMillis!,
+      capture.event.startedAtMillis -
+          configuration.eventEvidenceBefore.inMilliseconds,
+    );
+    for (final sample in capture.locationSamples) {
+      start = math.min(start, sample.timestampMillis);
+    }
+    for (final sample in capture.motionSamples) {
+      start = math.min(start, sample.timestampMicros ~/ 1000);
+    }
+
     final chunk = TelemetryChunk(
       schemaVersion: TelemetryBinaryCodec.schemaVersion,
       tripId: _tripId!,
       chunkId: capture.event.evidenceChunkId!,
       chunkIndex: _nextChunkIndex(),
       type: TelemetryChunkType.eventEvidence,
-      startedAtMillis: math.max(
-        _startedAtMillis!,
-        capture.event.startedAtMillis -
-            configuration.eventEvidenceBefore.inMilliseconds,
-      ).toInt(),
+      startedAtMillis: start,
       endedAtMillis: math.max(
         capture.event.endedAtMillis,
         actualEndedAtMillis ?? capture.captureUntilMillis,
-      ).toInt(),
+      ),
       locations: List<LocationSample>.unmodifiable(capture.locationSamples),
       rawMotionSamples:
           List<RawMotionSample>.unmodifiable(capture.motionSamples),
@@ -479,18 +541,24 @@ class DrivingTelemetryRecorder {
     _continuousFrames.clear();
     _continuousEvents.clear();
 
-    final start = <int>[
-      if (locations.isNotEmpty) locations.first.timestampMillis,
-      if (frames.isNotEmpty) frames.first.startedAtMillis,
-      if (events.isNotEmpty) events.first.startedAtMillis,
-    ].reduce(math.min);
-    final end = <int>[
-      if (locations.isNotEmpty) locations.last.timestampMillis,
-      if (frames.isNotEmpty)
-        frames.last.startedAtMillis + frames.last.durationMillis,
-      if (events.isNotEmpty) events.last.endedAtMillis,
-      endedAtMillis,
-    ].reduce(math.max);
+    // Scan every element rather than assuming list order matches time order:
+    // events complete in end order, not start order, and GPS timestamps can
+    // regress. The chunk start must not exceed any contained timestamp, or
+    // the delta encoding would fail.
+    var start = endedAtMillis;
+    var end = endedAtMillis;
+    for (final value in locations) {
+      start = math.min(start, value.timestampMillis);
+      end = math.max(end, value.timestampMillis);
+    }
+    for (final value in frames) {
+      start = math.min(start, value.startedAtMillis);
+      end = math.max(end, value.startedAtMillis + value.durationMillis);
+    }
+    for (final value in events) {
+      start = math.min(start, value.startedAtMillis);
+      end = math.max(end, value.endedAtMillis);
+    }
 
     final chunk = TelemetryChunk(
       schemaVersion: TelemetryBinaryCodec.schemaVersion,
@@ -562,9 +630,7 @@ class DrivingTelemetryRecorder {
   double _radians(double degrees) => degrees * math.pi / 180;
 
   void _handleSourceError(Object error, StackTrace stackTrace) {
-    if (!_errorController.isClosed) {
-      _errorController.addError(error, stackTrace);
-    }
+    _reportError(error);
   }
 
   void _resetRuntimeBuffers() {
@@ -597,9 +663,10 @@ class DrivingTelemetryRecorder {
     if (_state == TelemetryRecorderState.recording) {
       try {
         await stopTrip();
-      } catch (_) {
-        await motionSource.stop();
-        await locationSource.stop();
+      } catch (error) {
+        // stopTrip already tears down the sources on failure; dispose only
+        // reports the error so it never throws itself.
+        _reportError(error);
       }
     }
     _state = TelemetryRecorderState.disposed;

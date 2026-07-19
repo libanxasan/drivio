@@ -50,11 +50,11 @@ class GeolocatorLocationSource implements LocationSource {
       );
     }
 
-    _started = true;
     _subscription = Geolocator.getPositionStream(
       locationSettings: locationSettings,
     ).listen(
       (position) {
+        if (_controller.isClosed) return;
         final timestamp = position.timestamp.toUtc().millisecondsSinceEpoch;
         _controller.add(
           LocationSample(
@@ -71,8 +71,12 @@ class GeolocatorLocationSource implements LocationSource {
           ),
         );
       },
-      onError: _controller.addError,
+      onError: (Object error, StackTrace stackTrace) {
+        if (_controller.isClosed) return;
+        _controller.addError(error, stackTrace);
+      },
     );
+    _started = true;
   }
 
   @override
