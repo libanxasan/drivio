@@ -12,7 +12,9 @@ class OsrmClient {
   OsrmClient({
     this.configuration = const OsrmConfiguration(),
     http.Client? client,
-  }) : _client = client ?? http.Client();
+  }) : _client = client ?? http.Client() {
+    configuration.validate();
+  }
 
   /// OSRM settings.
   final OsrmConfiguration configuration;

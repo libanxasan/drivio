@@ -1,14 +1,32 @@
 /// Source used to determine an effective legal speed limit.
 enum SpeedLimitSource {
+  /// Authoritative backend road-rule override.
   backendOverride,
+
+  /// Parsed OpenStreetMap maxspeed tag.
   openStreetMap,
+
+  /// Statutory national or regional default.
   statutoryDefault,
+
+  /// Default derived from the road class.
   roadClassDefault,
+
+  /// No limit could be determined.
   unavailable,
 }
 
 /// Direction relative to an OpenStreetMap way.
-enum TravelDirection { forward, backward, unknown }
+enum TravelDirection {
+  /// Traveling in way direction.
+  forward,
+
+  /// Traveling against way direction.
+  backward,
+
+  /// Direction is not known.
+  unknown,
+}
 
 /// Resolved speed limit and provenance.
 class EffectiveSpeedLimit {

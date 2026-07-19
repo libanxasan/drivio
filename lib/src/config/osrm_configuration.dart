@@ -6,8 +6,21 @@ class OsrmConfiguration {
     this.profile = 'driving',
     this.maximumPointsPerRequest = 80,
     this.requestTimeout = const Duration(seconds: 30),
-  })  : assert(maximumPointsPerRequest >= 2),
-        assert(requestTimeout > Duration.zero);
+  }) : assert(maximumPointsPerRequest >= 2);
+
+  /// Throws [ArgumentError] when a duration setting is out of range.
+  ///
+  /// Duration comparisons cannot run inside const constructor asserts, so
+  /// [OsrmClient] calls this at runtime.
+  void validate() {
+    if (requestTimeout <= Duration.zero) {
+      throw ArgumentError.value(
+        requestTimeout,
+        'requestTimeout',
+        'Must be greater than zero.',
+      );
+    }
+  }
 
   /// OSRM server base URL.
   final String baseUrl;

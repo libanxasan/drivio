@@ -29,31 +29,45 @@ class SensorMotionSource implements MotionSource {
   @override
   Future<void> start() async {
     if (_started) return;
-    _started = true;
 
-    _gyroscopeSubscription = gyroscopeEvents(
-      samplingPeriod: samplingPeriod,
-    ).listen(
-      (event) {
-        _latestGyroscope = Vector3Value(event.x, event.y, event.z);
-      },
-      onError: _controller.addError,
-    );
+    try {
+      _gyroscopeSubscription = gyroscopeEventStream(
+        samplingPeriod: samplingPeriod,
+      ).listen(
+        (event) {
+          _latestGyroscope = Vector3Value(event.x, event.y, event.z);
+        },
+        onError: _forwardError,
+      );
 
-    _accelerometerSubscription = userAccelerometerEvents(
-      samplingPeriod: samplingPeriod,
-    ).listen(
-      (event) {
-        _controller.add(
-          RawMotionSample(
-            timestampMicros: DateTime.now().toUtc().microsecondsSinceEpoch,
-            userAcceleration: Vector3Value(event.x, event.y, event.z),
-            gyroscope: _latestGyroscope,
-          ),
-        );
-      },
-      onError: _controller.addError,
-    );
+      _accelerometerSubscription = userAccelerometerEventStream(
+        samplingPeriod: samplingPeriod,
+      ).listen(
+        (event) {
+          if (_controller.isClosed) return;
+          _controller.add(
+            RawMotionSample(
+              timestampMicros: DateTime.now().toUtc().microsecondsSinceEpoch,
+              userAcceleration: Vector3Value(event.x, event.y, event.z),
+              gyroscope: _latestGyroscope,
+            ),
+          );
+        },
+        onError: _forwardError,
+      );
+      _started = true;
+    } catch (_) {
+      await _accelerometerSubscription?.cancel();
+      await _gyroscopeSubscription?.cancel();
+      _accelerometerSubscription = null;
+      _gyroscopeSubscription = null;
+      rethrow;
+    }
+  }
+
+  void _forwardError(Object error, StackTrace stackTrace) {
+    if (_controller.isClosed) return;
+    _controller.addError(error, stackTrace);
   }
 
   @override

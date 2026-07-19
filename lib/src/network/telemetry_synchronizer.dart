@@ -70,11 +70,16 @@ class TelemetrySynchronizer {
         }
       } catch (error) {
         failed++;
-        await store.markFailed(
-          item.tripId,
-          item.chunk.chunkId,
-          error.toString(),
-        );
+        try {
+          await store.markFailed(
+            item.tripId,
+            item.chunk.chunkId,
+            error.toString(),
+          );
+        } catch (_) {
+          // Recording the failure is best-effort; the chunk remains in a
+          // non-uploaded state and is retried on the next pass.
+        }
       }
     }
 

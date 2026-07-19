@@ -6,10 +6,19 @@ import 'raw_motion_sample.dart';
 
 /// Telemetry chunk categories.
 enum TelemetryChunkType {
+  /// Condensed continuous locations, motion frames, and event summaries.
   continuous,
+
+  /// High-resolution raw telemetry around one candidate event.
   eventEvidence,
+
+  /// One statistical aggregate per hour.
   hourlyAggregate,
+
+  /// Compressed matched-route JSON artifact.
   route,
+
+  /// Compressed trip-manifest JSON artifact.
   tripManifest,
 }
 

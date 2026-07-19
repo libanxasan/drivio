@@ -29,12 +29,16 @@ class FileTelemetryStore implements TelemetryStore {
   }
 
   @override
-  Future<void> initialize() async {
-    if (_root != null) return;
-    final base = _rootDirectoryOverride ?? await getApplicationSupportDirectory();
-    _root = Directory('${base.path}/driving_telemetry');
-    await _root!.create(recursive: true);
-    await Directory('${_root!.path}/trips').create(recursive: true);
+  Future<void> initialize() {
+    return _mutex.protect(() async {
+      if (_root != null) return;
+      final base =
+          _rootDirectoryOverride ?? await getApplicationSupportDirectory();
+      final root = Directory('${base.path}/driving_telemetry');
+      await root.create(recursive: true);
+      await Directory('${root.path}/trips').create(recursive: true);
+      _root = root;
+    });
   }
 
   @override
@@ -273,12 +277,15 @@ class FileTelemetryStore implements TelemetryStore {
   }
 
   @override
-  Future<void> deleteChunkFile(String tripId, String chunkId) async {
-    final manifest = await readManifest(tripId);
-    final matching = manifest.chunks.where((value) => value.chunkId == chunkId);
-    if (matching.isEmpty) return;
-    final file = File('${_requiredRoot.path}/${matching.first.relativePath}');
-    if (await file.exists()) await file.delete();
+  Future<void> deleteChunkFile(String tripId, String chunkId) {
+    return _mutex.protect(() async {
+      final manifest = await _readManifestUnlocked(tripId);
+      final matching =
+          manifest.chunks.where((value) => value.chunkId == chunkId);
+      if (matching.isEmpty) return;
+      final file = File('${_requiredRoot.path}/${matching.first.relativePath}');
+      if (await file.exists()) await file.delete();
+    });
   }
 
   @override
@@ -313,14 +320,25 @@ class FileTelemetryStore implements TelemetryStore {
   Future<void> _atomicWriteString(File file, String value) async {
     final temporary = File('${file.path}.tmp');
     await temporary.writeAsString(value, flush: true);
-    if (await file.exists()) await file.delete();
-    await temporary.rename(file.path);
+    await _replace(temporary, file);
   }
 
   Future<void> _atomicWriteBytes(File file, List<int> value) async {
     final temporary = File('${file.path}.tmp');
     await temporary.writeAsBytes(value, flush: true);
-    if (await file.exists()) await file.delete();
-    await temporary.rename(file.path);
+    await _replace(temporary, file);
+  }
+
+  /// Renames over the destination so a crash never leaves it missing.
+  ///
+  /// POSIX rename replaces the destination atomically. On file systems where
+  /// that fails, fall back to delete-then-rename.
+  Future<void> _replace(File temporary, File file) async {
+    try {
+      await temporary.rename(file.path);
+    } on FileSystemException {
+      if (await file.exists()) await file.delete();
+      await temporary.rename(file.path);
+    }
   }
 }
