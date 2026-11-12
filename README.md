@@ -167,6 +167,8 @@ The backend should return a 2xx status for an accepted upload or a duplicate wit
 
 `TelemetrySyncResult.cleanupFailed` counts acknowledged chunks whose local files could not be removed. These chunks remain uploaded in the manifest.
 
+The optional [Convex backend](docs/CONVEX_BACKEND.md) accepts this upload contract and adds trip location search and GPS replay. The guide includes local and cloud setup, authentication and a smoke test.
+
 ## Local storage structure
 
 ```text

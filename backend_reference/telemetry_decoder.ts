@@ -7,7 +7,20 @@ export type DecodedAxisStatistics = {
   sampleCount: number
 }
 
-export type DecodedTelemetryChunk = {
+export type DecodedLocation = {
+  timestampMillis: number
+  latitude: number
+  longitude: number
+  speedMps: number
+  headingDegrees: number
+  accuracyMeters: number
+  altitudeMeters: number
+  speedAccuracyMps: number
+  headingAccuracyDegrees: number
+  isMocked: boolean
+}
+
+type DecodedChunkHeader = {
   schemaVersion: number
   chunkType: number
   tripId: string
@@ -15,7 +28,10 @@ export type DecodedTelemetryChunk = {
   chunkIndex: number
   startedAtMillis: number
   endedAtMillis: number
-  locations: Array<Record<string, number | boolean>>
+}
+
+export type DecodedTelemetryChunk = DecodedChunkHeader & {
+  locations: DecodedLocation[]
   motionFrames: Array<Record<string, unknown>>
   rawMotionSamples: Array<Record<string, unknown>>
   events: Array<Record<string, unknown>>
@@ -51,7 +67,12 @@ class CompactReader {
       if (shift > 49) throw new Error('Telemetry varint exceeds safe integer range')
       const byte = this.readByte()
       result += (byte & 0x7f) * 2 ** shift
-      if ((byte & 0x80) === 0) return result
+      if ((byte & 0x80) === 0) {
+        if (!Number.isSafeInteger(result)) {
+          throw new Error('Telemetry varint exceeds safe integer range')
+        }
+        return result
+      }
       shift += 7
     }
   }
@@ -87,8 +108,7 @@ function readVector(reader: CompactReader): { x: number; y: number; z: number } 
   }
 }
 
-export function decodeTelemetryChunk(bytes: Uint8Array): DecodedTelemetryChunk {
-  const reader = new CompactReader(bytes)
+function readChunkHeader(reader: CompactReader): DecodedChunkHeader {
   const magic = Array.from(reader.readBytes(4))
   if (magic.join(',') !== '68,84,76,49') {
     throw new Error('Invalid DTL1 telemetry magic')
@@ -105,8 +125,14 @@ export function decodeTelemetryChunk(bytes: Uint8Array): DecodedTelemetryChunk {
   const chunkIndex = reader.readVarUint()
   const startedAtMillis = reader.readVarUint()
   const endedAtMillis = startedAtMillis + reader.readVarUint()
+  return { schemaVersion, chunkType, tripId, chunkId, chunkIndex, startedAtMillis, endedAtMillis }
+}
 
-  const locations: Array<Record<string, number | boolean>> = []
+function readLocations(
+  reader: CompactReader,
+  startedAtMillis: number,
+  visit: (location: DecodedLocation) => void,
+): void {
   let previousTime = startedAtMillis
   let previousLatitudeE7 = 0
   let previousLongitudeE7 = 0
@@ -127,11 +153,29 @@ export function decodeTelemetryChunk(bytes: Uint8Array): DecodedTelemetryChunk {
       headingAccuracyDegrees: reader.readVarUint() / 100,
       isMocked: reader.readByte() === 1,
     }
-    locations.push(location)
+    visit(location)
     previousTime = timestampMillis
     previousLatitudeE7 = latitudeE7
     previousLongitudeE7 = longitudeE7
   }
+}
+
+export function inspectTelemetryLocations(
+  bytes: Uint8Array,
+  visit?: (location: DecodedLocation) => void,
+): DecodedChunkHeader {
+  const reader = new CompactReader(bytes)
+  const header = readChunkHeader(reader)
+  if (visit) readLocations(reader, header.startedAtMillis, visit)
+  return header
+}
+
+export function decodeTelemetryChunk(bytes: Uint8Array): DecodedTelemetryChunk {
+  const reader = new CompactReader(bytes)
+  const header = readChunkHeader(reader)
+  const { startedAtMillis } = header
+  const locations: DecodedLocation[] = []
+  readLocations(reader, startedAtMillis, (location) => locations.push(location))
 
   const motionFrames: Array<Record<string, unknown>> = []
   const frameCount = reader.readVarUint()
@@ -219,13 +263,7 @@ export function decodeTelemetryChunk(bytes: Uint8Array): DecodedTelemetryChunk {
   }
 
   return {
-    schemaVersion,
-    chunkType,
-    tripId,
-    chunkId,
-    chunkIndex,
-    startedAtMillis,
-    endedAtMillis,
+    ...header,
     locations,
     motionFrames,
     rawMotionSamples,
@@ -237,7 +275,7 @@ export function decodeTelemetryChunk(bytes: Uint8Array): DecodedTelemetryChunk {
 export async function decodeCompressedTelemetry(
   compressedBytes: Uint8Array,
 ): Promise<DecodedTelemetryChunk> {
-  const stream = new Blob([compressedBytes])
+  const stream = new Blob([new Uint8Array(compressedBytes)])
     .stream()
     .pipeThrough(new DecompressionStream('gzip'))
   const bytes = new Uint8Array(await new Response(stream).arrayBuffer())
