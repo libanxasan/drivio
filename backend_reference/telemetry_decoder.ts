@@ -20,7 +20,7 @@ export type DecodedLocation = {
   isMocked: boolean
 }
 
-export type DecodedTelemetryChunk = {
+type DecodedChunkHeader = {
   schemaVersion: number
   chunkType: number
   tripId: string
@@ -28,6 +28,9 @@ export type DecodedTelemetryChunk = {
   chunkIndex: number
   startedAtMillis: number
   endedAtMillis: number
+}
+
+export type DecodedTelemetryChunk = DecodedChunkHeader & {
   locations: DecodedLocation[]
   motionFrames: Array<Record<string, unknown>>
   rawMotionSamples: Array<Record<string, unknown>>
@@ -105,8 +108,7 @@ function readVector(reader: CompactReader): { x: number; y: number; z: number } 
   }
 }
 
-export function decodeTelemetryChunk(bytes: Uint8Array): DecodedTelemetryChunk {
-  const reader = new CompactReader(bytes)
+function readChunkHeader(reader: CompactReader): DecodedChunkHeader {
   const magic = Array.from(reader.readBytes(4))
   if (magic.join(',') !== '68,84,76,49') {
     throw new Error('Invalid DTL1 telemetry magic')
@@ -123,8 +125,14 @@ export function decodeTelemetryChunk(bytes: Uint8Array): DecodedTelemetryChunk {
   const chunkIndex = reader.readVarUint()
   const startedAtMillis = reader.readVarUint()
   const endedAtMillis = startedAtMillis + reader.readVarUint()
+  return { schemaVersion, chunkType, tripId, chunkId, chunkIndex, startedAtMillis, endedAtMillis }
+}
 
-  const locations: DecodedLocation[] = []
+function readLocations(
+  reader: CompactReader,
+  startedAtMillis: number,
+  visit: (location: DecodedLocation) => void,
+): void {
   let previousTime = startedAtMillis
   let previousLatitudeE7 = 0
   let previousLongitudeE7 = 0
@@ -145,11 +153,29 @@ export function decodeTelemetryChunk(bytes: Uint8Array): DecodedTelemetryChunk {
       headingAccuracyDegrees: reader.readVarUint() / 100,
       isMocked: reader.readByte() === 1,
     }
-    locations.push(location)
+    visit(location)
     previousTime = timestampMillis
     previousLatitudeE7 = latitudeE7
     previousLongitudeE7 = longitudeE7
   }
+}
+
+export function inspectTelemetryLocations(
+  bytes: Uint8Array,
+  visit?: (location: DecodedLocation) => void,
+): DecodedChunkHeader {
+  const reader = new CompactReader(bytes)
+  const header = readChunkHeader(reader)
+  if (visit) readLocations(reader, header.startedAtMillis, visit)
+  return header
+}
+
+export function decodeTelemetryChunk(bytes: Uint8Array): DecodedTelemetryChunk {
+  const reader = new CompactReader(bytes)
+  const header = readChunkHeader(reader)
+  const { startedAtMillis } = header
+  const locations: DecodedLocation[] = []
+  readLocations(reader, startedAtMillis, (location) => locations.push(location))
 
   const motionFrames: Array<Record<string, unknown>> = []
   const frameCount = reader.readVarUint()
@@ -237,13 +263,7 @@ export function decodeTelemetryChunk(bytes: Uint8Array): DecodedTelemetryChunk {
   }
 
   return {
-    schemaVersion,
-    chunkType,
-    tripId,
-    chunkId,
-    chunkIndex,
-    startedAtMillis,
-    endedAtMillis,
+    ...header,
     locations,
     motionFrames,
     rawMotionSamples,

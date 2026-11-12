@@ -23,7 +23,7 @@ Use Node.js 22 or later and run commands from the repository root. Both componen
 1. Install the package and register its `convex.config.js` export with `app.use(batchedReplay)` in `convex/convex.config.ts`.
 2. Generate bindings for `components.batchedReplay` with `npx convex dev --once`. `convex/telemetry.ts` uses the server-side `BatchedReplay` class, with one room per trip and one stream per accepted continuous chunk.
 3. Upload a continuous DTL1 chunk with GPS samples. Replay is populated in the same mutation that records the upload receipt. The component retains each batch for seven days from ingestion, with its scheduled cleanup. A retry with the same chunk ID and checksum does not append again.
-4. Call `telemetry:history` on the deployment URL with the same user's JWT and `tripId`. Pass `nextChunkIndex` as `afterChunkIndex` until it is `null`. `limit` defaults to four chunks and can be up to eight. Results are ordered by chunk index regardless of arrival order. A page can have no samples and still have a cursor if batches have expired.
+4. Call `telemetry:history` on the deployment URL with the same user's JWT and `tripId`. Pass `nextChunkIndex` as `afterChunkIndex` until it is `null`. `limit` defaults to four chunks and can be up to eight. Results are ordered by chunk index regardless of arrival order. A page can have no samples and still have a cursor if batches have expired. Restart from the first page after synchronization if you began paging while uploads were still arriving.
 5. Drive playback timing from `samples[].recordedAtMillis`. The component timestamps batches on ingestion. DriVio keeps capture timestamps in the sample values and preserves them across late uploads. A chunk with more than 2,000 valid points is evenly sampled for replay. The compressed archive contains the full original payload.
 
 ## Environment variables
@@ -42,6 +42,7 @@ Neither component requires an API key or component-specific environment variable
 | `CONVEX_SITE_URL` | Flutter host configuration | HTTP Actions base URL for uploads, typically `https://<deployment>.convex.site`. The local smoke test reads this from `.env.local` when present. |
 | `CONVEX_URL` | Client configuration | Deployment base URL for `POST /api/query`, typically `https://<deployment>.convex.cloud`. The local smoke test reads this from `.env.local`. |
 | `CONVEX_AGENT_MODE` | Local CLI shell | Set to `anonymous` for the disposable local verification below. |
+| `CONVEX_SELF_HOSTED_URL` | Local smoke-test shell | Optional. Point to a disposable self-hosted backend on loopback in place of an anonymous deployment. Supply `CONVEX_SITE_URL` when it uses a different port from the default. |
 
 Convex validates bearer tokens with the configured public keys. The token subject must equal the Flutter recorder's `userId` and the `X-User-Id` request header. With an existing Supabase host, use the current user's ID and current session access token. [Convex custom JWT configuration](https://docs.convex.dev/auth/advanced/custom-jwt) · [Supabase JWT verification](https://supabase.com/docs/guides/auth/jwts)
 
@@ -60,9 +61,11 @@ CONVEX_AGENT_MODE=anonymous npm run dev
 
 Leave `npm run dev` running. In a second terminal at the repository root run `npm run test:convex`. It sends gzip DTL1 and JSON chunks to the real HTTP action and checks authentication, owner isolation, checksums, duplicate and conflicting uploads, radius filtering, replay pagination and out-of-order arrival. For the Flutter regression suite, run `flutter analyze` and `flutter test` at the root, then `flutter test` in `example/`.
 
+For a disposable self-hosted Convex backend on loopback, export its `CONVEX_SELF_HOSTED_URL`, `CONVEX_SELF_HOSTED_ADMIN_KEY` and `CONVEX_SITE_URL`. Run `npm run test:convex -- --prepare`, `npx convex env set --from-file .convex/drivio-smoke-auth.env`, `npx convex deploy --yes --typecheck enable`, and `npm run test:convex` against that backend. [Convex self-hosting](https://docs.convex.dev/self-hosting)
+
 ## Deploy and verify a cloud preview
 
-1. In the intended Convex project, set the preview environment variables above for your auth provider in **Project Settings > Environment Variables**. Use a test issuer or test user with an asymmetric signing key.
+1. In the intended Convex project, set preview defaults for the `DRIVIO_AUTH_*` variables in **Project Settings > Environment Variables**. For an existing preview, apply the values to that deployment. Use a test issuer or test user with an asymmetric signing key. [Project environment variable defaults](https://docs.convex.dev/production/environment-variables#project-environment-variable-defaults)
 2. Set `CONVEX_DEPLOY_KEY` from the project's preview deploy key in the shell or CI secret store. Run `npm ci`, `npm run check`, then `npx convex deploy --preview-name drivio-convex-components`. Retrieve the two URLs from that preview deployment's settings. [Convex preview deployments](https://docs.convex.dev/production/multiple-deployments#using-preview-deployments)
 3. Set the Flutter `HttpTelemetryBackendClient.endpoint` to `<CONVEX_SITE_URL>/v1/telemetry/chunks` and supply the existing token callback. Record and stop a short test trip, then call `synchronizePendingData()`. Check for successful upload receipts and retry the same test payload to confirm the duplicate response. The endpoint accepts up to 4 MiB compressed and 8 MiB decompressed per chunk.
 4. With the same access token, call each read function using the deployment URL. Replace the sample coordinates and trip ID with the test trip's values. Verify the location and GPS timestamps, then repeat the calls with a second test user's token and check that the original trip is absent. [Convex HTTP API](https://docs.convex.dev/http-api/)

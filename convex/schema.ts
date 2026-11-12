@@ -19,6 +19,10 @@ export default defineSchema({
   })
     .index("by_trip_and_chunkId", ["trip", "chunkId"])
     .index("by_trip_and_chunkIndex", ["trip", "chunkIndex"])
-    .index("by_trip_and_hasReplay_and_chunkIndex", ["trip", "hasReplay", "chunkIndex"])
+    .index("by_trip_and_hasReplay_and_chunkIndex", [
+      "trip",
+      "hasReplay",
+      "chunkIndex",
+    ])
     .index("by_storageId", ["storageId"]),
 });

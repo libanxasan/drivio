@@ -41,5 +41,7 @@ export const maxCompressedBytes = 4 * 1024 * 1024;
 export const maxDecompressedBytes = 8 * 1024 * 1024;
 
 export function validCoordinates(latitude: number, longitude: number): boolean {
-  return latitude >= -90 && latitude <= 90 && longitude >= -180 && longitude <= 180;
+  return (
+    latitude >= -90 && latitude <= 90 && longitude >= -180 && longitude <= 180
+  );
 }
