@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:math' as math;
 
 import '../aggregation/hourly_aggregator.dart';
@@ -26,7 +27,7 @@ import 'motion_source.dart';
 
 /// Recorder state.
 enum TelemetryRecorderState {
-  /// No trip is active.
+  /// Collection is idle. A failed trip save may still need to be retried.
   idle,
 
   /// A trip is being started.
@@ -40,6 +41,24 @@ enum TelemetryRecorderState {
 
   /// The recorder has been disposed and can no longer be used.
   disposed,
+}
+
+enum _TripSaveStage {
+  writingTelemetry,
+  writingManifest,
+  closingTrip,
+  readingResult,
+}
+
+class _TripSave {
+  _TripSave(this.endedAtMillis);
+
+  final int endedAtMillis;
+  final String manifestChunkId = IdGenerator.create('manifest');
+  _TripSaveStage stage = _TripSaveStage.writingTelemetry;
+  late final int manifestChunkIndex;
+  OsrmMatchResult? route;
+  String? routeError;
 }
 
 /// Raw telemetry recorder with no scoring logic.
@@ -96,6 +115,8 @@ class DrivingTelemetryRecorder {
       StreamController<TelemetryEventCandidate>.broadcast();
   final StreamController<Object> _errorController =
       StreamController<Object>.broadcast();
+  final StreamController<TelemetryRecorderState> _stateController =
+      StreamController<TelemetryRecorderState>.broadcast();
 
   StreamSubscription<RawMotionSample>? _motionSubscription;
   StreamSubscription<LocationSample>? _locationSubscription;
@@ -106,8 +127,13 @@ class DrivingTelemetryRecorder {
       <TelemetryEventCandidate>[];
   final List<LocationSample> _completeLocationTrace = <LocationSample>[];
   final List<EventEvidenceCapture> _activeEvidence = <EventEvidenceCapture>[];
+  final Queue<TelemetryChunk> _failedChunkWrites = Queue<TelemetryChunk>();
 
   Future<void> _writeTail = Future<void>.value();
+  Future<String>? _starting;
+  Future<TelemetryTripResult>? _stopping;
+  Future<void>? _disposing;
+  _TripSave? _tripSave;
   TelemetryRecorderState _state = TelemetryRecorderState.idle;
   String? _tripId;
   int? _startedAtMillis;
@@ -121,17 +147,27 @@ class DrivingTelemetryRecorder {
   /// Current lifecycle state.
   TelemetryRecorderState get state => _state;
 
+  /// Lifecycle transitions after subscription. Read [state] for the current value.
+  Stream<TelemetryRecorderState> get states => _stateController.stream;
+
   /// Whether a trip is currently being recorded.
   bool get isRecording => _state == TelemetryRecorderState.recording;
 
-  /// Current trip identifier.
-  String? get activeTripId => _tripId;
+  /// Whether [stopTrip] can retry saving the last trip in this recorder.
+  bool get canRetryTripSave =>
+      _state == TelemetryRecorderState.idle &&
+      _tripSave != null &&
+      _disposing == null;
+
+  /// Trip identifier while a trip is starting, recording, or stopping.
+  String? get activeTripId =>
+      _state == TelemetryRecorderState.idle ? null : _tripId;
 
   /// Candidate events, exposed for optional diagnostics only.
   Stream<TelemetryEventCandidate> get candidateEvents =>
       _eventController.stream;
 
-  /// Non-fatal stream and network errors.
+  /// Non-fatal recorder diagnostics and source stream errors.
   Stream<Object> get errors => _errorController.stream;
 
   /// Starts a telemetry trip.
@@ -141,27 +177,44 @@ class DrivingTelemetryRecorder {
     Map<String, Object?> metadata = const <String, Object?>{},
   }) async {
     _ensureNotDisposed();
+    if (canRetryTripSave) {
+      throw StateError(
+        'Finish saving the previous trip before starting another.',
+      );
+    }
     if (_state != TelemetryRecorderState.idle) {
       throw StateError('Recorder must be idle before starting a trip.');
     }
 
-    _state = TelemetryRecorderState.starting;
     final resolvedTripId = tripId ?? IdGenerator.create('trip');
     final now = DateTime.now().toUtc().millisecondsSinceEpoch;
+    _transitionTo(TelemetryRecorderState.starting);
+    final starting = Future<String>.microtask(
+      () => _startTrip(resolvedTripId, userId, now, metadata),
+    );
+    _starting = starting;
+    return starting;
+  }
 
+  Future<String> _startTrip(
+    String tripId,
+    String userId,
+    int startedAtMillis,
+    Map<String, Object?> metadata,
+  ) async {
     try {
       await store.initialize();
       await store.createTrip(
-        tripId: resolvedTripId,
+        tripId: tripId,
         userId: userId,
-        startedAtMillis: now,
+        startedAtMillis: startedAtMillis,
         schemaVersion: TelemetryBinaryCodec.schemaVersion,
         metadata: metadata,
       );
 
-      _tripId = resolvedTripId;
-      _startedAtMillis = now;
-      _chunkStartedAtMillis = now;
+      _tripId = tripId;
+      _startedAtMillis = startedAtMillis;
+      _chunkStartedAtMillis = startedAtMillis;
       _resetRuntimeBuffers();
 
       _motionSubscription = motionSource.samples.listen(
@@ -175,15 +228,15 @@ class DrivingTelemetryRecorder {
 
       await locationSource.start();
       await motionSource.start();
-      _state = TelemetryRecorderState.recording;
-      return resolvedTripId;
+      _transitionTo(TelemetryRecorderState.recording);
+      return tripId;
     } catch (_) {
       await _stopSources();
-      _tripId = null;
-      _startedAtMillis = null;
-      _chunkStartedAtMillis = null;
-      _state = TelemetryRecorderState.idle;
+      _clearTrip();
+      _transitionTo(TelemetryRecorderState.idle);
       rethrow;
+    } finally {
+      _starting = null;
     }
   }
 
@@ -226,35 +279,39 @@ class DrivingTelemetryRecorder {
 
   /// Adds a candidate generated by an external road-context component.
   void recordExternalCandidate(TelemetryEventCandidate event) {
-    if (!isRecording) {
+    if (!isRecording || _disposing != null) {
       throw StateError('A trip must be active to record a candidate.');
     }
     _registerCandidate(event);
   }
 
   /// Stops the trip, persists all remaining data, and optionally matches the route.
+  /// If local persistence fails, call again to retry the same save.
   Future<TelemetryTripResult> stopTrip() async {
     _ensureNotDisposed();
-    if (_state != TelemetryRecorderState.recording) {
+    if (!isRecording && !canRetryTripSave) {
       throw StateError('No active telemetry trip.');
     }
-    _state = TelemetryRecorderState.stopping;
-
-    await _stopSources();
-
-    try {
-      return await _finishTrip();
-    } finally {
-      _state = TelemetryRecorderState.idle;
-      _tripId = null;
-      _startedAtMillis = null;
-      _chunkStartedAtMillis = null;
-      _resetRuntimeBuffers();
-    }
+    return _beginStop();
   }
 
-  Future<TelemetryTripResult> _finishTrip() async {
-    final endedAt = DateTime.now().toUtc().millisecondsSinceEpoch;
+  Future<TelemetryTripResult> _beginStop() {
+    _transitionTo(TelemetryRecorderState.stopping);
+    final stopping = Future<TelemetryTripResult>.microtask(() async {
+      try {
+        final result = await _saveTrip();
+        _clearTrip();
+        return result;
+      } finally {
+        _stopping = null;
+        _transitionTo(TelemetryRecorderState.idle);
+      }
+    });
+    _stopping = stopping;
+    return stopping;
+  }
+
+  void _flushTripBuffers(int endedAt) {
     final partialFrame = _motionAggregator.flush();
     if (partialFrame != null) _registerFrame(partialFrame);
 
@@ -267,30 +324,48 @@ class DrivingTelemetryRecorder {
 
     final hourly = _hourlyAggregator.flush();
     if (hourly != null) _enqueueHourly(hourly);
+  }
 
-    await _writeTail;
+  Future<void> _matchRoute(_TripSave save) async {
+    final client = osrmClient;
+    if (client == null || _completeLocationTrace.length < 2) return;
+    try {
+      final route = await client.matchTrace(_completeLocationTrace);
+      save.route = route;
+      await store.writeJsonArtifact(
+        tripId: _tripId!,
+        chunkId: IdGenerator.create('route'),
+        chunkIndex: _nextChunkIndex(),
+        type: TelemetryChunkType.route,
+        startedAtMillis: _startedAtMillis!,
+        endedAtMillis: save.endedAtMillis,
+        schemaVersion: TelemetryBinaryCodec.schemaVersion,
+        value: route.toJson().cast<String, Object?>(),
+      );
+    } catch (error) {
+      save.routeError = error.toString();
+      _reportError(error);
+    }
+  }
 
-    OsrmMatchResult? osrmMatch;
-    String? routeError;
-    if (osrmClient != null && _completeLocationTrace.length >= 2) {
-      try {
-        osrmMatch = await osrmClient!.matchTrace(_completeLocationTrace);
-        final chunkId = IdGenerator.create('route');
-        final index = _nextChunkIndex();
-        await store.writeJsonArtifact(
-          tripId: _tripId!,
-          chunkId: chunkId,
-          chunkIndex: index,
-          type: TelemetryChunkType.route,
-          startedAtMillis: _startedAtMillis!,
-          endedAtMillis: endedAt,
-          schemaVersion: TelemetryBinaryCodec.schemaVersion,
-          value: osrmMatch.toJson().cast<String, Object?>(),
-        );
-      } catch (error) {
-        routeError = error.toString();
-        _reportError(error);
+  Future<TelemetryTripResult> _saveTrip() async {
+    if (_tripSave == null) {
+      await _stopSources();
+      final endedAt = DateTime.now().toUtc().millisecondsSinceEpoch;
+      _tripSave = _TripSave(endedAt);
+      _flushTripBuffers(endedAt);
+    }
+    final save = _tripSave!;
+
+    if (save.stage == _TripSaveStage.writingTelemetry) {
+      await _writeTail;
+      while (_failedChunkWrites.isNotEmpty) {
+        await _writeChunk(_failedChunkWrites.first);
+        _failedChunkWrites.removeFirst();
       }
+      await _matchRoute(save);
+      save.manifestChunkIndex = _nextChunkIndex();
+      save.stage = _TripSaveStage.writingManifest;
     }
 
     final tripMetadata = <String, Object?>{
@@ -298,49 +373,54 @@ class DrivingTelemetryRecorder {
       'locationSampleCount': _completeLocationTrace.length,
       'motionFrameCount': _motionFrameCount,
       'eventCount': _eventCount,
-      'osrmMatchedDistanceMeters': osrmMatch?.totalDistanceMeters,
-      'osrmMatchConfidence': osrmMatch?.weightedConfidence,
-      'routeProcessingError': routeError,
+      'osrmMatchedDistanceMeters': save.route?.totalDistanceMeters,
+      'osrmMatchConfidence': save.route?.weightedConfidence,
+      'routeProcessingError': save.routeError,
     };
 
-    await store.writeJsonArtifact(
-      tripId: _tripId!,
-      chunkId: IdGenerator.create('manifest'),
-      chunkIndex: _nextChunkIndex(),
-      type: TelemetryChunkType.tripManifest,
-      startedAtMillis: _startedAtMillis!,
-      endedAtMillis: endedAt,
-      schemaVersion: TelemetryBinaryCodec.schemaVersion,
-      value: <String, Object?>{
-        'tripId': _tripId!,
-        'startedAtMillis': _startedAtMillis!,
-        'endedAtMillis': endedAt,
-        'schemaVersion': TelemetryBinaryCodec.schemaVersion,
-        'status': 'closed',
-        'telemetry': tripMetadata,
-      },
-    );
-
-    await store.closeTrip(
-      tripId: _tripId!,
-      endedAtMillis: endedAt,
-      metadataUpdates: tripMetadata,
-    );
+    if (save.stage == _TripSaveStage.writingManifest) {
+      await store.writeJsonArtifact(
+        tripId: _tripId!,
+        chunkId: save.manifestChunkId,
+        chunkIndex: save.manifestChunkIndex,
+        type: TelemetryChunkType.tripManifest,
+        startedAtMillis: _startedAtMillis!,
+        endedAtMillis: save.endedAtMillis,
+        schemaVersion: TelemetryBinaryCodec.schemaVersion,
+        value: <String, Object?>{
+          'tripId': _tripId!,
+          'startedAtMillis': _startedAtMillis!,
+          'endedAtMillis': save.endedAtMillis,
+          'schemaVersion': TelemetryBinaryCodec.schemaVersion,
+          'status': 'closed',
+          'telemetry': tripMetadata,
+        },
+      );
+      save.stage = _TripSaveStage.closingTrip;
+    }
+    if (save.stage == _TripSaveStage.closingTrip) {
+      await store.closeTrip(
+        tripId: _tripId!,
+        endedAtMillis: save.endedAtMillis,
+        metadataUpdates: tripMetadata,
+      );
+      save.stage = _TripSaveStage.readingResult;
+    }
 
     final manifest = await store.readManifest(_tripId!);
     final pending = await store.pendingChunkCount(_tripId!);
     return TelemetryTripResult(
       tripId: _tripId!,
       startedAtMillis: _startedAtMillis!,
-      endedAtMillis: endedAt,
+      endedAtMillis: save.endedAtMillis,
       rawGpsDistanceMeters: _rawGpsDistanceMeters,
       locationSampleCount: _completeLocationTrace.length,
       motionFrameCount: _motionFrameCount,
       eventCount: _eventCount,
       chunkCount: manifest.chunks.length,
       pendingUploadCount: pending,
-      osrmMatch: osrmMatch,
-      routeProcessingError: routeError,
+      osrmMatch: save.route,
+      routeProcessingError: save.routeError,
     );
   }
 
@@ -420,8 +500,8 @@ class DrivingTelemetryRecorder {
     _activeEvidence.add(
       EventEvidenceCapture(
         event: updated,
-        captureUntilMillis:
-            event.endedAtMillis + configuration.eventEvidenceAfter.inMilliseconds,
+        captureUntilMillis: event.endedAtMillis +
+            configuration.eventEvidenceAfter.inMilliseconds,
         initialMotion: _motionRing.since(minimumTime),
         initialLocations: _locationRing.since(minimumTime),
       ),
@@ -486,9 +566,7 @@ class DrivingTelemetryRecorder {
           List<RawMotionSample>.unmodifiable(capture.motionSamples),
       events: <TelemetryEventCandidate>[capture.event],
     );
-    _enqueueWrite(() async {
-      await store.writeChunk(chunk, _codec.encode(chunk));
-    });
+    _enqueueWrite(chunk);
   }
 
   void _enqueueHourly(HourlyTelemetryAggregate aggregate) {
@@ -502,9 +580,7 @@ class DrivingTelemetryRecorder {
       endedAtMillis: aggregate.hourEndedAtMillis,
       hourlyAggregate: aggregate,
     );
-    _enqueueWrite(() async {
-      await store.writeChunk(chunk, _codec.encode(chunk));
-    });
+    _enqueueWrite(chunk);
   }
 
   void _checkChunkFlush(int timestampMillis) {
@@ -573,14 +649,19 @@ class DrivingTelemetryRecorder {
       events: events,
     );
     _chunkStartedAtMillis = endedAtMillis;
-    _enqueueWrite(() async {
-      await store.writeChunk(chunk, _codec.encode(chunk));
-    });
+    _enqueueWrite(chunk);
   }
 
-  void _enqueueWrite(Future<void> Function() action) {
-    _writeTail = _writeTail.then((_) => action()).catchError((Object error) {
-      if (!_errorController.isClosed) _errorController.add(error);
+  Future<void> _writeChunk(TelemetryChunk chunk) async {
+    await store.writeChunk(chunk, _codec.encode(chunk));
+  }
+
+  void _enqueueWrite(TelemetryChunk chunk) {
+    _writeTail = _writeTail.then((_) => _writeChunk(chunk)).catchError((
+      Object error,
+    ) {
+      _failedChunkWrites.addLast(chunk);
+      _reportError(error);
     });
   }
 
@@ -630,7 +711,9 @@ class DrivingTelemetryRecorder {
   double _radians(double degrees) => degrees * math.pi / 180;
 
   void _handleSourceError(Object error, StackTrace stackTrace) {
-    _reportError(error);
+    if (!_errorController.isClosed) {
+      _errorController.addError(error, stackTrace);
+    }
   }
 
   void _resetRuntimeBuffers() {
@@ -651,26 +734,54 @@ class DrivingTelemetryRecorder {
     _previousValidLocation = null;
   }
 
+  void _clearTrip() {
+    _tripId = null;
+    _startedAtMillis = null;
+    _chunkStartedAtMillis = null;
+    _tripSave = null;
+    _failedChunkWrites.clear();
+    _resetRuntimeBuffers();
+  }
+
+  void _transitionTo(TelemetryRecorderState state) {
+    _state = state;
+    _stateController.add(state);
+  }
+
   void _ensureNotDisposed() {
-    if (_state == TelemetryRecorderState.disposed) {
+    if (_disposing != null) {
       throw StateError('Recorder has been disposed.');
     }
   }
 
-  /// Stops an active trip when possible and closes recorder streams.
-  Future<void> dispose() async {
-    if (_state == TelemetryRecorderState.disposed) return;
-    if (_state == TelemetryRecorderState.recording) {
-      try {
-        await stopTrip();
-      } catch (error) {
-        // stopTrip already tears down the sources on failure; dispose only
-        // reports the error so it never throws itself.
-        _reportError(error);
-      }
+  /// Waits for trip work, saves an active trip when possible, and closes streams.
+  Future<void> dispose() => _disposing ??= Future<void>.microtask(_dispose);
+
+  Future<void> _dispose() async {
+    try {
+      await _starting;
+    } catch (_) {
+      // The caller of startTrip receives the startup failure.
     }
-    _state = TelemetryRecorderState.disposed;
-    await _eventController.close();
-    await _errorController.close();
+
+    try {
+      final stopping = _stopping;
+      if (stopping != null) {
+        await stopping;
+      } else if (isRecording || _tripSave != null) {
+        await _beginStop();
+      }
+    } catch (error) {
+      _reportError(error);
+    }
+
+    await _writeTail;
+    _clearTrip();
+    _transitionTo(TelemetryRecorderState.disposed);
+    await Future.wait<void>(<Future<void>>[
+      _stateController.close(),
+      _eventController.close(),
+      _errorController.close(),
+    ]);
   }
 }
