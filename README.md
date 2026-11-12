@@ -390,3 +390,5 @@ The package records sensitive location and motion data. A production application
 ## Trip completion
 
 Stopping a trip creates a compressed JSON `tripManifest` artifact. The reference backend uses it to close the trip and persist final telemetry metadata.
+
+Use `recorder.states` to drive the host UI. If `stopTrip()` throws and `recorder.canRetryTripSave` is true, call `stopTrip()` again to finish saving the same trip. See [Drivio state machines](docs/STATE_MACHINES.md) for the full transition inventory.

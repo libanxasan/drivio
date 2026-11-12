@@ -33,6 +33,9 @@ class _FakeMotionSource implements MotionSource {
 }
 
 class _FakeLocationSource implements LocationSource {
+  _FakeLocationSource({this.startGate});
+
+  final Completer<void>? startGate;
   int startCount = 0;
   int stopCount = 0;
 
@@ -45,6 +48,7 @@ class _FakeLocationSource implements LocationSource {
   @override
   Future<void> start() async {
     startCount++;
+    await startGate?.future;
   }
 
   @override
@@ -53,39 +57,26 @@ class _FakeLocationSource implements LocationSource {
   }
 }
 
-/// Delegating store that can fail JSON artifact writes.
-class _FlakyStore implements TelemetryStore {
-  _FlakyStore(this.inner);
+class _FlakyStore extends FileTelemetryStore {
+  _FlakyStore(Directory root) : super(rootDirectory: root);
 
-  final TelemetryStore inner;
   bool failJsonArtifacts = false;
-
-  @override
-  Future<void> initialize() => inner.initialize();
-
-  @override
-  Future<TripManifest> createTrip({
-    required String tripId,
-    required String userId,
-    required int startedAtMillis,
-    required int schemaVersion,
-    Map<String, Object?> metadata = const <String, Object?>{},
-  }) {
-    return inner.createTrip(
-      tripId: tripId,
-      userId: userId,
-      startedAtMillis: startedAtMillis,
-      schemaVersion: schemaVersion,
-      metadata: metadata,
-    );
-  }
+  bool failChunkWrites = false;
+  bool failClose = false;
+  Completer<void>? closeGate;
+  final manifestWriteAttempts = <({String id, int index})>[];
+  final chunkWriteAttempts = <TelemetryChunk>[];
 
   @override
   Future<StoredTelemetryChunk> writeChunk(
     TelemetryChunk chunk,
     Uint8List uncompressedBytes,
   ) {
-    return inner.writeChunk(chunk, uncompressedBytes);
+    chunkWriteAttempts.add(chunk);
+    if (failChunkWrites) {
+      throw const FileSystemException('Simulated binary write failure.');
+    }
+    return super.writeChunk(chunk, uncompressedBytes);
   }
 
   @override
@@ -99,10 +90,13 @@ class _FlakyStore implements TelemetryStore {
     required int schemaVersion,
     required Map<String, Object?> value,
   }) {
+    if (type == TelemetryChunkType.tripManifest) {
+      manifestWriteAttempts.add((id: chunkId, index: chunkIndex));
+    }
     if (failJsonArtifacts) {
       throw const FileSystemException('Simulated storage failure.');
     }
-    return inner.writeJsonArtifact(
+    return super.writeJsonArtifact(
       tripId: tripId,
       chunkId: chunkId,
       chunkIndex: chunkIndex,
@@ -119,45 +113,17 @@ class _FlakyStore implements TelemetryStore {
     required String tripId,
     required int endedAtMillis,
     Map<String, Object?> metadataUpdates = const <String, Object?>{},
-  }) {
-    return inner.closeTrip(
+  }) async {
+    await closeGate?.future;
+    if (failClose) {
+      throw const FileSystemException('Simulated close failure.');
+    }
+    return super.closeTrip(
       tripId: tripId,
       endedAtMillis: endedAtMillis,
       metadataUpdates: metadataUpdates,
     );
   }
-
-  @override
-  Future<TripManifest> readManifest(String tripId) =>
-      inner.readManifest(tripId);
-
-  @override
-  Future<List<PendingTelemetryChunk>> listPendingChunks() =>
-      inner.listPendingChunks();
-
-  @override
-  Future<Uint8List> readStoredChunk(StoredTelemetryChunk chunk) =>
-      inner.readStoredChunk(chunk);
-
-  @override
-  Future<void> markUploading(String tripId, String chunkId) =>
-      inner.markUploading(tripId, chunkId);
-
-  @override
-  Future<void> markUploaded(String tripId, String chunkId) =>
-      inner.markUploaded(tripId, chunkId);
-
-  @override
-  Future<void> markFailed(String tripId, String chunkId, String error) =>
-      inner.markFailed(tripId, chunkId, error);
-
-  @override
-  Future<void> deleteChunkFile(String tripId, String chunkId) =>
-      inner.deleteChunkFile(tripId, chunkId);
-
-  @override
-  Future<int> pendingChunkCount(String tripId) =>
-      inner.pendingChunkCount(tripId);
 }
 
 void main() {
@@ -168,14 +134,15 @@ void main() {
 
     final motion = _FakeMotionSource(failOnStart: true);
     final location = _FakeLocationSource();
+    final store = FileTelemetryStore(rootDirectory: temporary);
     final recorder = DrivingTelemetryRecorder(
-      store: FileTelemetryStore(rootDirectory: temporary),
+      store: store,
       motionSource: motion,
       locationSource: location,
     );
 
     await expectLater(
-      recorder.startTrip(userId: 'user-1'),
+      recorder.startTrip(userId: 'user-1', tripId: 'failed-start'),
       throwsA(isA<StateError>()),
     );
 
@@ -183,27 +150,30 @@ void main() {
     expect(location.stopCount, 1);
     expect(recorder.state, TelemetryRecorderState.idle);
     expect(recorder.activeTripId, isNull);
+    expect(recorder.canRetryTripSave, isFalse);
 
     await recorder.dispose();
     await motion.controller.close();
     await location.controller.close();
   });
 
-  test('recorder recovers to idle when stop-time persistence fails', () async {
+  test('failed manifest write can retry the same trip and artifact', () async {
     final temporary =
         await Directory.systemTemp.createTemp('telemetry_lifecycle_');
     addTearDown(() => temporary.delete(recursive: true));
 
     final motion = _FakeMotionSource();
     final location = _FakeLocationSource();
-    final store = _FlakyStore(FileTelemetryStore(rootDirectory: temporary));
+    final store = _FlakyStore(temporary);
     final recorder = DrivingTelemetryRecorder(
       store: store,
       motionSource: motion,
       locationSource: location,
     );
 
-    await recorder.startTrip(userId: 'user-1');
+    final states = <TelemetryRecorderState>[];
+    recorder.states.listen(states.add);
+    final tripId = await recorder.startTrip(userId: 'user-1');
     store.failJsonArtifacts = true;
 
     await expectLater(
@@ -212,15 +182,171 @@ void main() {
     );
     expect(recorder.state, TelemetryRecorderState.idle);
     expect(recorder.activeTripId, isNull);
+    expect(recorder.canRetryTripSave, isTrue);
+    await expectLater(recorder.startTrip(userId: 'user-1'), throwsStateError);
 
-    // The recorder must remain usable for the next trip.
     store.failJsonArtifacts = false;
-    final tripId = await recorder.startTrip(userId: 'user-1');
     final result = await recorder.stopTrip();
     expect(result.tripId, tripId);
     expect(recorder.state, TelemetryRecorderState.idle);
+    expect(recorder.canRetryTripSave, isFalse);
+    expect(store.manifestWriteAttempts, hasLength(2));
+    expect(store.manifestWriteAttempts.toSet(), hasLength(1));
+    expect(motion.stopCount, 1);
+    expect(location.stopCount, 1);
+    expect((await store.readManifest(tripId)).status, 'closed');
 
     await recorder.dispose();
+    expect(states, <TelemetryRecorderState>[
+      TelemetryRecorderState.starting,
+      TelemetryRecorderState.recording,
+      TelemetryRecorderState.stopping,
+      TelemetryRecorderState.idle,
+      TelemetryRecorderState.stopping,
+      TelemetryRecorderState.idle,
+      TelemetryRecorderState.disposed,
+    ]);
+    await motion.controller.close();
+    await location.controller.close();
+  });
+
+  test('trip stays open when binary writes fail and retains the failed chunk',
+      () async {
+    final temporary =
+        await Directory.systemTemp.createTemp('telemetry_lifecycle_');
+    addTearDown(() => temporary.delete(recursive: true));
+    final motion = _FakeMotionSource();
+    final location = _FakeLocationSource();
+    final store = _FlakyStore(temporary)..failChunkWrites = true;
+    final recorder = DrivingTelemetryRecorder(
+      store: store,
+      motionSource: motion,
+      locationSource: location,
+    );
+    final tripId = await recorder.startTrip(userId: 'user-1');
+    location.controller.add(
+      LocationSample(
+        timestampMillis: DateTime.now().millisecondsSinceEpoch,
+        latitude: 11.57,
+        longitude: 43.14,
+        speedMps: 10,
+        headingDegrees: 90,
+        accuracyMeters: 5,
+      ),
+    );
+    await Future<void>.delayed(Duration.zero);
+
+    await expectLater(recorder.stopTrip(), throwsA(isA<FileSystemException>()));
+    final failedId = store.chunkWriteAttempts.first.chunkId;
+    expect(recorder.canRetryTripSave, isTrue);
+    expect((await store.readManifest(tripId)).status, 'recording');
+    expect(store.manifestWriteAttempts, isEmpty);
+
+    store.failChunkWrites = false;
+    final result = await recorder.stopTrip();
+    final manifest = await store.readManifest(tripId);
+    expect(result.locationSampleCount, 1);
+    expect(manifest.status, 'closed');
+    expect(manifest.chunks.where((chunk) => chunk.chunkId == failedId),
+        hasLength(1));
+    await recorder.dispose();
+    await motion.controller.close();
+    await location.controller.close();
+  });
+
+  test('retry after a close failure keeps the written manifest artifact',
+      () async {
+    final temporary =
+        await Directory.systemTemp.createTemp('telemetry_lifecycle_');
+    addTearDown(() => temporary.delete(recursive: true));
+    final motion = _FakeMotionSource();
+    final location = _FakeLocationSource();
+    final store = _FlakyStore(temporary)..failClose = true;
+    final recorder = DrivingTelemetryRecorder(
+      store: store,
+      motionSource: motion,
+      locationSource: location,
+    );
+    final tripId = await recorder.startTrip(userId: 'user-1');
+    await expectLater(recorder.stopTrip(), throwsA(isA<FileSystemException>()));
+    final partial = await store.readManifest(tripId);
+    expect(partial.status, 'recording');
+    expect(partial.chunks.single.type, TelemetryChunkType.tripManifest);
+    await store.markUploaded(tripId, partial.chunks.single.chunkId);
+
+    store.failClose = false;
+    final result = await recorder.stopTrip();
+    final saved = await store.readManifest(tripId);
+    expect(result.pendingUploadCount, 0);
+    expect(saved.status, 'closed');
+    expect(store.manifestWriteAttempts, hasLength(1));
+    expect(saved.chunks.single.uploadStatus, ChunkUploadStatus.uploaded);
+    await recorder.dispose();
+    await motion.controller.close();
+    await location.controller.close();
+  });
+
+  test('dispose waits for startup, saves the trip, and closes once', () async {
+    final temporary =
+        await Directory.systemTemp.createTemp('telemetry_lifecycle_');
+    addTearDown(() => temporary.delete(recursive: true));
+    final startGate = Completer<void>();
+    final motion = _FakeMotionSource();
+    final location = _FakeLocationSource(startGate: startGate);
+    final store = _FlakyStore(temporary);
+    final recorder = DrivingTelemetryRecorder(
+      store: store,
+      motionSource: motion,
+      locationSource: location,
+    );
+
+    final starting = recorder.startTrip(userId: 'user-1');
+    expect(recorder.state, TelemetryRecorderState.starting);
+    final disposing = recorder.dispose();
+    expect(recorder.dispose(), same(disposing));
+    await expectLater(recorder.startTrip(userId: 'user-1'), throwsStateError);
+    startGate.complete();
+    final tripId = await starting;
+    await disposing;
+
+    expect(recorder.state, TelemetryRecorderState.disposed);
+    expect(recorder.activeTripId, isNull);
+    expect(motion.stopCount, 1);
+    expect(location.stopCount, 1);
+    expect((await store.readManifest(tripId)).status, 'closed');
+    await motion.controller.close();
+    await location.controller.close();
+  });
+
+  test('dispose joins an in-progress stop without starting another save',
+      () async {
+    final temporary =
+        await Directory.systemTemp.createTemp('telemetry_lifecycle_');
+    addTearDown(() => temporary.delete(recursive: true));
+    final closeGate = Completer<void>();
+    final motion = _FakeMotionSource();
+    final location = _FakeLocationSource();
+    final store = _FlakyStore(temporary)..closeGate = closeGate;
+    final recorder = DrivingTelemetryRecorder(
+      store: store,
+      motionSource: motion,
+      locationSource: location,
+    );
+
+    final tripId = await recorder.startTrip(userId: 'user-1');
+    final stopping = recorder.stopTrip();
+    expect(recorder.state, TelemetryRecorderState.stopping);
+    final disposing = recorder.dispose();
+    await Future<void>.delayed(Duration.zero);
+    expect(recorder.state, TelemetryRecorderState.stopping);
+    closeGate.complete();
+    expect((await stopping).tripId, tripId);
+    await disposing;
+
+    expect(recorder.state, TelemetryRecorderState.disposed);
+    expect(store.manifestWriteAttempts, hasLength(1));
+    expect(motion.stopCount, 1);
+    expect(location.stopCount, 1);
     await motion.controller.close();
     await location.controller.close();
   });
