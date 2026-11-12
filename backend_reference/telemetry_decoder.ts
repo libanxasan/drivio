@@ -7,6 +7,19 @@ export type DecodedAxisStatistics = {
   sampleCount: number
 }
 
+export type DecodedLocation = {
+  timestampMillis: number
+  latitude: number
+  longitude: number
+  speedMps: number
+  headingDegrees: number
+  accuracyMeters: number
+  altitudeMeters: number
+  speedAccuracyMps: number
+  headingAccuracyDegrees: number
+  isMocked: boolean
+}
+
 export type DecodedTelemetryChunk = {
   schemaVersion: number
   chunkType: number
@@ -15,7 +28,7 @@ export type DecodedTelemetryChunk = {
   chunkIndex: number
   startedAtMillis: number
   endedAtMillis: number
-  locations: Array<Record<string, number | boolean>>
+  locations: DecodedLocation[]
   motionFrames: Array<Record<string, unknown>>
   rawMotionSamples: Array<Record<string, unknown>>
   events: Array<Record<string, unknown>>
@@ -51,7 +64,12 @@ class CompactReader {
       if (shift > 49) throw new Error('Telemetry varint exceeds safe integer range')
       const byte = this.readByte()
       result += (byte & 0x7f) * 2 ** shift
-      if ((byte & 0x80) === 0) return result
+      if ((byte & 0x80) === 0) {
+        if (!Number.isSafeInteger(result)) {
+          throw new Error('Telemetry varint exceeds safe integer range')
+        }
+        return result
+      }
       shift += 7
     }
   }
@@ -106,7 +124,7 @@ export function decodeTelemetryChunk(bytes: Uint8Array): DecodedTelemetryChunk {
   const startedAtMillis = reader.readVarUint()
   const endedAtMillis = startedAtMillis + reader.readVarUint()
 
-  const locations: Array<Record<string, number | boolean>> = []
+  const locations: DecodedLocation[] = []
   let previousTime = startedAtMillis
   let previousLatitudeE7 = 0
   let previousLongitudeE7 = 0
@@ -237,7 +255,7 @@ export function decodeTelemetryChunk(bytes: Uint8Array): DecodedTelemetryChunk {
 export async function decodeCompressedTelemetry(
   compressedBytes: Uint8Array,
 ): Promise<DecodedTelemetryChunk> {
-  const stream = new Blob([compressedBytes])
+  const stream = new Blob([new Uint8Array(compressedBytes)])
     .stream()
     .pipeThrough(new DecompressionStream('gzip'))
   const bytes = new Uint8Array(await new Response(stream).arrayBuffer())
