@@ -269,9 +269,14 @@ class FileTelemetryStore implements TelemetryStore {
   ) {
     return _mutex.protect(() async {
       final manifest = await _readManifestUnlocked(tripId);
-      final chunks = manifest.chunks.map((value) {
-        return value.chunkId == chunkId ? update(value) : value;
-      }).toList(growable: false);
+      final index =
+          manifest.chunks.indexWhere((chunk) => chunk.chunkId == chunkId);
+      if (index < 0) return;
+      final current = manifest.chunks[index];
+      if (current.uploadStatus == ChunkUploadStatus.uploaded) return;
+
+      final chunks = [...manifest.chunks];
+      chunks[index] = update(current);
       await _writeManifest(manifest.copyWith(chunks: chunks));
     });
   }
