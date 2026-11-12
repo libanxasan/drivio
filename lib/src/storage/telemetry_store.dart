@@ -28,7 +28,7 @@ class PendingTelemetryChunk {
 
 /// Durable telemetry storage abstraction.
 abstract interface class TelemetryStore {
-  /// Initializes backing storage.
+  /// Initializes backing storage. Repeated calls reuse initialized storage.
   Future<void> initialize();
 
   /// Creates a trip manifest.
@@ -68,7 +68,7 @@ abstract interface class TelemetryStore {
   /// Reads a manifest.
   Future<TripManifest> readManifest(String tripId);
 
-  /// Lists all pending or failed chunks.
+  /// Lists chunks eligible to upload, including interrupted attempts.
   Future<List<PendingTelemetryChunk>> listPendingChunks();
 
   /// Reads compressed chunk bytes.

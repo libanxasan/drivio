@@ -63,26 +63,35 @@ class HttpTelemetryBackendClient implements TelemetryBackendClient {
         )
         .timeout(timeout);
 
-    if (response.statusCode == 409) {
-      return const TelemetryUploadReceipt(
-        accepted: true,
-        alreadyExisted: true,
-      );
-    }
-
+    final rawBody = response.body;
     Map<String, dynamic>? body;
-    if (response.body.isNotEmpty) {
+    if (rawBody.isNotEmpty) {
       try {
-        body = jsonDecode(response.body) as Map<String, dynamic>;
+        final decoded = jsonDecode(rawBody);
+        if (decoded is Map<String, dynamic>) body = decoded;
       } on FormatException {
         body = null;
       }
     }
 
+    // Keep the empty 409 acknowledgement used by older integrations. A 409
+    // with a body needs a duplicate receipt, since it can be a checksum error.
+    if (response.statusCode == 409 &&
+        (rawBody.trim().isEmpty ||
+            (body?['alreadyExisted'] == true &&
+                (body?['accepted'] ?? true) == true))) {
+      return TelemetryUploadReceipt(
+        accepted: true,
+        alreadyExisted: true,
+        backendChunkId: body?['chunkId']?.toString(),
+        message: body?['message']?.toString(),
+      );
+    }
+
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw TelemetryUploadException(
         statusCode: response.statusCode,
-        message: body?['message']?.toString() ?? response.body,
+        message: body?['message']?.toString() ?? rawBody,
       );
     }
 

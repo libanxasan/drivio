@@ -163,7 +163,9 @@ X-Started-At-Ms
 X-Ended-At-Ms
 ```
 
-The backend should return any 2xx status when the chunk is accepted. HTTP 409 is treated as an acknowledgement that the idempotency key already exists.
+The backend should return a 2xx status for an accepted upload or a duplicate with the same checksum. For legacy endpoints, an empty HTTP 409 is still an acknowledgement. A 409 response with a body needs `alreadyExisted: true` and may include `accepted: true`. Other conflict responses leave the local chunk queued for retry.
+
+`TelemetrySyncResult.cleanupFailed` counts acknowledged chunks whose local files could not be removed. These chunks remain uploaded in the manifest.
 
 ## Local storage structure
 

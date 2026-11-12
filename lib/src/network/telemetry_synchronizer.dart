@@ -1,5 +1,6 @@
 import '../model/telemetry_chunk.dart';
 import '../storage/telemetry_store.dart';
+import '../utils/async_mutex.dart';
 import 'backend_client.dart';
 
 /// Summary of one synchronization pass.
@@ -9,6 +10,7 @@ class TelemetrySyncResult {
     required this.attempted,
     required this.uploaded,
     required this.failed,
+    this.cleanupFailed = 0,
   });
 
   /// Chunks attempted.
@@ -17,8 +19,11 @@ class TelemetrySyncResult {
   /// Chunks acknowledged.
   final int uploaded;
 
-  /// Chunks that failed.
+  /// Chunks whose upload or local acknowledgement failed.
   final int failed;
+
+  /// Acknowledged chunks whose local file could not be removed.
+  final int cleanupFailed;
 }
 
 /// Synchronizes locally persisted chunks with idempotent backend uploads.
@@ -43,14 +48,24 @@ class TelemetrySynchronizer {
   /// Whether acknowledged event evidence is removed locally.
   final bool deleteUploadedEventEvidence;
 
+  static final _storeLocks = Expando<AsyncMutex>();
+
   /// Uploads pending chunks in manifest order.
-  Future<TelemetrySyncResult> synchronize({int? maximumChunks}) async {
+  /// Passes using the same store instance run in order.
+  Future<TelemetrySyncResult> synchronize({int? maximumChunks}) {
+    final lock = _storeLocks[store] ??= AsyncMutex();
+    return lock.protect(() => _synchronize(maximumChunks));
+  }
+
+  Future<TelemetrySyncResult> _synchronize(int? maximumChunks) async {
+    await store.initialize();
     final pending = await store.listPendingChunks();
     final selected = maximumChunks == null
         ? pending
         : pending.take(maximumChunks).toList(growable: false);
     var uploaded = 0;
     var failed = 0;
+    var cleanupFailed = 0;
 
     for (final item in selected) {
       try {
@@ -64,10 +79,6 @@ class TelemetrySynchronizer {
           throw StateError(receipt.message ?? 'Backend rejected telemetry.');
         }
         await store.markUploaded(item.tripId, item.chunk.chunkId);
-        uploaded++;
-        if (_shouldDelete(item.chunk.type)) {
-          await store.deleteChunkFile(item.tripId, item.chunk.chunkId);
-        }
       } catch (error) {
         failed++;
         try {
@@ -80,6 +91,16 @@ class TelemetrySynchronizer {
           // Recording the failure is best-effort; the chunk remains in a
           // non-uploaded state and is retried on the next pass.
         }
+        continue;
+      }
+
+      uploaded++;
+      if (_shouldDelete(item.chunk.type)) {
+        try {
+          await store.deleteChunkFile(item.tripId, item.chunk.chunkId);
+        } catch (_) {
+          cleanupFailed++;
+        }
       }
     }
 
@@ -87,6 +108,7 @@ class TelemetrySynchronizer {
       attempted: selected.length,
       uploaded: uploaded,
       failed: failed,
+      cleanupFailed: cleanupFailed,
     );
   }
 
