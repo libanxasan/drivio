@@ -20,8 +20,8 @@ class _ScriptedBackend implements TelemetryBackendClient {
   }) async {
     if (failingChunkIds.contains(pending.chunk.chunkId)) {
       throw const TelemetryUploadException(
-        statusCode: 503,
-        message: 'Service unavailable.',
+        statusCode: 500,
+        message: 'Internal server error.',
       );
     }
     uploadedChunkIds.add(pending.chunk.chunkId);
@@ -78,7 +78,11 @@ void main() {
     await _seedChunks(store, count: 3);
 
     final backend = _ScriptedBackend(<String>{'chunk-1'});
-    final synchronizer = TelemetrySynchronizer(store: store, backend: backend);
+    final synchronizer = TelemetrySynchronizer(
+      store: store,
+      backend: backend,
+      retryPolicy: UploadRetryPolicy.immediate,
+    );
 
     final result = await synchronizer.synchronize();
     expect(result.attempted, 3);
@@ -97,7 +101,7 @@ void main() {
     final failedChunk =
         manifest.chunks.singleWhere((chunk) => chunk.chunkId == 'chunk-1');
     expect(failedChunk.retryCount, 1);
-    expect(failedChunk.lastError, contains('503'));
+    expect(failedChunk.lastError, contains('500'));
 
     // The failed chunk remains pending for the next pass.
     final pending = await store.listPendingChunks();
@@ -152,7 +156,11 @@ void main() {
       }),
     );
     addTearDown(backend.close);
-    final synchronizer = TelemetrySynchronizer(store: store, backend: backend);
+    final synchronizer = TelemetrySynchronizer(
+      store: store,
+      backend: backend,
+      retryPolicy: UploadRetryPolicy.immediate,
+    );
 
     final conflict = await synchronizer.synchronize();
     expect(conflict.attempted, 1);

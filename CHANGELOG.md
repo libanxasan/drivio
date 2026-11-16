@@ -1,3 +1,15 @@
+## 0.2.0
+
+Reliability, performance and battery improvements.
+
+- Background recording: `BackgroundLocationOptions` runs location updates in an Android foreground service with a wake lock, and enables iOS background updates with automatic pausing turned off.
+- Kill recovery: `recorder.recoverInterruptedTrips()` and `TelemetryTripRecovery` close trips left open by a killed process. Buffered samples are flushed at least every `checkpointInterval` (30 s), and `recorder.checkpoint()` flushes on demand.
+- `SqliteTelemetryStore`: WAL-mode SQLite storage with atomic writes, indexed pending queries, safe access from several isolates, and `importFileStore` for existing data. `TelemetryStore` gains `listTrips()`.
+- Compression and checksums run outside the store lock and in a background isolate for payloads of 16 KiB or more (`PayloadCompressor`).
+- Uploads: `UploadRetryPolicy` adds per-chunk exponential backoff with jitter, a pass stops after network errors, timeouts, 429 or 503, and `synchronize` accepts a `timeBudget`. `TelemetrySyncScheduler` runs foreground passes with backoff and connectivity triggers, and `runBackgroundTelemetrySync` serves WorkManager and BGTaskScheduler tasks.
+- Battery: motion sensors pause while the vehicle is stationary and resume on movement (`pauseMotionWhenStationary`).
+- Requires Dart 3.10 and Flutter 3.38 or later (for `sqlite3` 3.x).
+
 ## 0.1.1
 
 Stability and reliability fixes.

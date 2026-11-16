@@ -32,6 +32,7 @@ class StoredTelemetryChunk {
     required this.uploadStatus,
     this.retryCount = 0,
     this.lastError,
+    this.lastAttemptAtMillis,
   });
 
   /// Stable chunk identifier.
@@ -73,12 +74,16 @@ class StoredTelemetryChunk {
   /// Most recent upload error.
   final String? lastError;
 
+  /// Wall-clock time of the most recent upload attempt.
+  final int? lastAttemptAtMillis;
+
   /// Copy with changed upload state.
   StoredTelemetryChunk copyWith({
     ChunkUploadStatus? uploadStatus,
     int? retryCount,
     String? lastError,
     bool clearLastError = false,
+    int? lastAttemptAtMillis,
   }) {
     return StoredTelemetryChunk(
       chunkId: chunkId,
@@ -94,6 +99,7 @@ class StoredTelemetryChunk {
       uploadStatus: uploadStatus ?? this.uploadStatus,
       retryCount: retryCount ?? this.retryCount,
       lastError: clearLastError ? null : lastError ?? this.lastError,
+      lastAttemptAtMillis: lastAttemptAtMillis ?? this.lastAttemptAtMillis,
     );
   }
 
@@ -112,6 +118,7 @@ class StoredTelemetryChunk {
         'uploadStatus': uploadStatus.name,
         'retryCount': retryCount,
         'lastError': lastError,
+        'lastAttemptAtMillis': lastAttemptAtMillis,
       };
 
   /// Creates metadata from JSON.
@@ -131,6 +138,7 @@ class StoredTelemetryChunk {
           ChunkUploadStatus.values.byName(json['uploadStatus']! as String),
       retryCount: (json['retryCount'] as int?) ?? 0,
       lastError: json['lastError'] as String?,
+      lastAttemptAtMillis: json['lastAttemptAtMillis'] as int?,
     );
   }
 }

@@ -2,9 +2,9 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:crypto/crypto.dart';
 import 'package:path_provider/path_provider.dart';
 
+import '../codec/payload_compression.dart';
 import '../model/telemetry_chunk.dart';
 import '../model/trip_manifest.dart';
 import '../utils/async_mutex.dart';
@@ -13,8 +13,13 @@ import 'telemetry_store.dart';
 /// File-based local telemetry store with atomic manifests.
 class FileTelemetryStore implements TelemetryStore {
   /// Creates a store. A root override is useful in tests and desktop tools.
-  FileTelemetryStore({Directory? rootDirectory})
-      : _rootDirectoryOverride = rootDirectory;
+  FileTelemetryStore({
+    Directory? rootDirectory,
+    this.compressor = const PayloadCompressor(),
+  }) : _rootDirectoryOverride = rootDirectory;
+
+  /// Compresses payloads before they are written.
+  final PayloadCompressor compressor;
 
   final Directory? _rootDirectoryOverride;
   final AsyncMutex _mutex = AsyncMutex();
@@ -71,7 +76,7 @@ class FileTelemetryStore implements TelemetryStore {
   Future<StoredTelemetryChunk> writeChunk(
     TelemetryChunk chunk,
     Uint8List uncompressedBytes,
-  ) {
+  ) async {
     return _writeCompressedChunk(
       tripId: chunk.tripId,
       chunkId: chunk.chunkId,
@@ -80,7 +85,7 @@ class FileTelemetryStore implements TelemetryStore {
       startedAtMillis: chunk.startedAtMillis,
       endedAtMillis: chunk.endedAtMillis,
       schemaVersion: chunk.schemaVersion,
-      uncompressedBytes: uncompressedBytes,
+      payload: await compressor.compress(uncompressedBytes),
       extension: 'dtl.gz',
       payloadFormat: 'compact-binary',
     );
@@ -96,8 +101,7 @@ class FileTelemetryStore implements TelemetryStore {
     required int endedAtMillis,
     required int schemaVersion,
     required Map<String, Object?> value,
-  }) {
-    final bytes = Uint8List.fromList(utf8.encode(jsonEncode(value)));
+  }) async {
     return _writeCompressedChunk(
       tripId: tripId,
       chunkId: chunkId,
@@ -106,7 +110,7 @@ class FileTelemetryStore implements TelemetryStore {
       startedAtMillis: startedAtMillis,
       endedAtMillis: endedAtMillis,
       schemaVersion: schemaVersion,
-      uncompressedBytes: bytes,
+      payload: await compressor.compressJson(value),
       extension: 'json.gz',
       payloadFormat: 'json',
     );
@@ -120,13 +124,15 @@ class FileTelemetryStore implements TelemetryStore {
     required int startedAtMillis,
     required int endedAtMillis,
     required int schemaVersion,
-    required Uint8List uncompressedBytes,
+    required CompressedPayload payload,
     required String extension,
     required String payloadFormat,
   }) {
+    // Compression already ran outside the lock, so other store operations
+    // are not blocked while a large chunk is compressed.
     return _mutex.protect(() async {
-      final compressed = Uint8List.fromList(gzip.encode(uncompressedBytes));
-      final checksum = sha256.convert(compressed).toString();
+      final compressed = payload.bytes;
+      final checksum = payload.checksumSha256;
       final relativePath = 'trips/$tripId/chunks/$chunkId.$extension';
       final output = File('${_requiredRoot.path}/$relativePath');
       await output.parent.create(recursive: true);
@@ -183,6 +189,23 @@ class FileTelemetryStore implements TelemetryStore {
   }
 
   @override
+  Future<List<TripManifest>> listTrips() {
+    return _mutex.protect(() async {
+      final trips = Directory('${_requiredRoot.path}/trips');
+      if (!await trips.exists()) return const <TripManifest>[];
+      final manifests = <TripManifest>[];
+      await for (final entity in trips.list()) {
+        if (entity is! Directory) continue;
+        final manifestFile = File('${entity.path}/manifest.json');
+        if (!await manifestFile.exists()) continue;
+        manifests.add(await _readManifestFile(manifestFile));
+      }
+      manifests.sort((a, b) => b.startedAtMillis.compareTo(a.startedAtMillis));
+      return manifests;
+    });
+  }
+
+  @override
   Future<List<PendingTelemetryChunk>> listPendingChunks() {
     return _mutex.protect(() async {
       final trips = Directory('${_requiredRoot.path}/trips');
@@ -233,6 +256,7 @@ class FileTelemetryStore implements TelemetryStore {
       (value) => value.copyWith(
         uploadStatus: ChunkUploadStatus.uploading,
         clearLastError: true,
+        lastAttemptAtMillis: DateTime.now().millisecondsSinceEpoch,
       ),
     );
   }
@@ -258,6 +282,7 @@ class FileTelemetryStore implements TelemetryStore {
         uploadStatus: ChunkUploadStatus.failed,
         retryCount: value.retryCount + 1,
         lastError: error,
+        lastAttemptAtMillis: DateTime.now().millisecondsSinceEpoch,
       ),
     );
   }

@@ -24,6 +24,7 @@ import '../storage/telemetry_store.dart';
 import '../utils/id_generator.dart';
 import 'location_source.dart';
 import 'motion_source.dart';
+import 'trip_recovery.dart';
 
 /// Recorder state.
 enum TelemetryRecorderState {
@@ -130,6 +131,12 @@ class DrivingTelemetryRecorder {
   final Queue<TelemetryChunk> _failedChunkWrites = Queue<TelemetryChunk>();
 
   Future<void> _writeTail = Future<void>.value();
+  Future<void> _motionToggle = Future<void>.value();
+  Timer? _checkpointTimer;
+  bool _motionPaused = false;
+  int? _stationarySinceMillis;
+  LocationSample? _motionPausedAt;
+  String? _startingTripId;
   Future<String>? _starting;
   Future<TelemetryTripResult>? _stopping;
   Future<void>? _disposing;
@@ -158,6 +165,9 @@ class DrivingTelemetryRecorder {
       _state == TelemetryRecorderState.idle &&
       _tripSave != null &&
       _disposing == null;
+
+  /// Whether motion sensors are paused because the vehicle is stationary.
+  bool get isMotionPaused => _motionPaused;
 
   /// Trip identifier while a trip is starting, recording, or stopping.
   String? get activeTripId =>
@@ -189,6 +199,7 @@ class DrivingTelemetryRecorder {
     final resolvedTripId = tripId ?? IdGenerator.create('trip');
     final now = DateTime.now().toUtc().millisecondsSinceEpoch;
     _transitionTo(TelemetryRecorderState.starting);
+    _startingTripId = resolvedTripId;
     final starting = Future<String>.microtask(
       () => _startTrip(resolvedTripId, userId, now, metadata),
     );
@@ -229,6 +240,10 @@ class DrivingTelemetryRecorder {
       await locationSource.start();
       await motionSource.start();
       _transitionTo(TelemetryRecorderState.recording);
+      _checkpointTimer = Timer.periodic(
+        configuration.checkpointInterval,
+        (_) => _checkpointBuffers(),
+      );
       return tripId;
     } catch (_) {
       await _stopSources();
@@ -237,12 +252,16 @@ class DrivingTelemetryRecorder {
       rethrow;
     } finally {
       _starting = null;
+      _startingTripId = null;
     }
   }
 
   /// Cancels subscriptions and stops both sources, reporting rather than
   /// throwing teardown errors so buffered telemetry can still be persisted.
   Future<void> _stopSources() async {
+    _checkpointTimer?.cancel();
+    _checkpointTimer = null;
+    await _motionToggle;
     final subscriptions = <StreamSubscription<Object?>?>[
       _motionSubscription,
       _locationSubscription,
@@ -270,6 +289,43 @@ class DrivingTelemetryRecorder {
 
   void _reportError(Object error) {
     if (!_errorController.isClosed) _errorController.add(error);
+  }
+
+  /// Closes trips left open by an earlier process that was killed while
+  /// recording, keeping every chunk that reached storage.
+  ///
+  /// Call at app start, before [startTrip]. The trip owned by this recorder
+  /// is never touched. Do not call while another recorder instance, such as
+  /// one in a background isolate, may still be writing to an open trip.
+  Future<List<RecoveredTrip>> recoverInterruptedTrips() {
+    _ensureNotDisposed();
+    return TelemetryTripRecovery(store).recover(
+      excludeTripIds: <String>{
+        if (_tripId != null) _tripId!,
+        if (_startingTripId != null) _startingTripId!,
+      },
+    );
+  }
+
+  /// Persists buffered continuous telemetry now and waits for queued writes.
+  ///
+  /// Call when the app moves to the background so a later kill loses as
+  /// little as possible. Recording continues normally.
+  Future<void> checkpoint() async {
+    _ensureNotDisposed();
+    _checkpointBuffers();
+    await _writeTail;
+  }
+
+  void _checkpointBuffers() {
+    if (!isRecording) return;
+    while (_failedChunkWrites.isNotEmpty) {
+      _enqueueWrite(_failedChunkWrites.removeFirst());
+    }
+    _enqueueContinuousFlush(
+      force: false,
+      endedAtMillis: DateTime.now().toUtc().millisecondsSinceEpoch,
+    );
   }
 
   /// Updates the effective limit used only to detect a candidate speeding window.
@@ -476,6 +532,56 @@ class DrivingTelemetryRecorder {
     }
     _finalizeCompletedEvidence(sample.timestampMillis);
     _checkChunkFlush(sample.timestampMillis);
+    if (valid) _updateStationaryState(sample);
+  }
+
+  /// Pauses motion sensors after the vehicle has been stationary for
+  /// [TelemetryConfiguration.stationaryDuration] and resumes them once GPS
+  /// reports movement again.
+  void _updateStationaryState(LocationSample sample) {
+    if (!configuration.pauseMotionWhenStationary) return;
+    if (_motionPaused) {
+      final pausedAt = _motionPausedAt;
+      final moved = pausedAt != null &&
+          _haversineMeters(pausedAt, sample) > _resumeDistanceMeters;
+      if (sample.speedKph >= configuration.resumeMotionSpeedKph || moved) {
+        _setMotionPaused(false, sample);
+      }
+      return;
+    }
+    if (sample.speedKph > configuration.stationarySpeedKph) {
+      _stationarySinceMillis = null;
+      return;
+    }
+    final since = _stationarySinceMillis ??= sample.timestampMillis;
+    if (sample.timestampMillis - since >=
+        configuration.stationaryDuration.inMilliseconds) {
+      _setMotionPaused(true, sample);
+    }
+  }
+
+  static const double _resumeDistanceMeters = 50;
+
+  void _setMotionPaused(bool paused, LocationSample at) {
+    _motionPaused = paused;
+    _motionPausedAt = paused ? at : null;
+    _stationarySinceMillis = null;
+    if (paused) {
+      final frame = _motionAggregator.flush();
+      if (frame != null) _registerFrame(frame);
+    }
+    _motionToggle = _motionToggle.then((_) async {
+      if (!isRecording) return;
+      try {
+        if (paused) {
+          await motionSource.stop();
+        } else {
+          await motionSource.start();
+        }
+      } catch (error) {
+        _reportError(error);
+      }
+    });
   }
 
   void _registerFrame(MotionFrame frame) {
@@ -732,6 +838,9 @@ class DrivingTelemetryRecorder {
     _eventCount = 0;
     _rawGpsDistanceMeters = 0;
     _previousValidLocation = null;
+    _motionPaused = false;
+    _motionPausedAt = null;
+    _stationarySinceMillis = null;
   }
 
   void _clearTrip() {
