@@ -90,7 +90,10 @@ final configuration = const TelemetryConfiguration(
   eventEvidenceAfter: Duration(seconds: 5),
 );
 
-final store = FileTelemetryStore();
+final store = SqliteTelemetryStore();
+await store.initialize();
+// One-time move of trips recorded with FileTelemetryStore.
+await store.importFileStore(deleteImported: true);
 
 final recorder = DrivingTelemetryRecorder(
   store: store,
@@ -98,9 +101,15 @@ final recorder = DrivingTelemetryRecorder(
   motionSource: SensorMotionSource(
     samplingPeriod: configuration.motionSamplingPeriod,
   ),
-  locationSource: GeolocatorLocationSource(),
+  // Keeps recording when the screen is off or another app is in front.
+  locationSource: GeolocatorLocationSource(
+    background: const BackgroundLocationOptions(),
+  ),
   osrmClient: OsrmClient(),
 );
+
+// Close trips left open by a process the OS killed while recording.
+final List<RecoveredTrip> recovered = await recorder.recoverInterruptedTrips();
 
 final tripId = await recorder.startTrip(
   userId: userId,
@@ -113,6 +122,36 @@ final TelemetryTripResult result = await recorder.stopTrip();
 ```
 
 The recorder does not require a live monitoring screen. The host application only needs to start and stop the trip session, or connect these operations to automatic trip detection.
+
+## Surviving the app being killed
+
+Mobile operating systems kill background apps under memory pressure, and users swipe apps away. The package limits what is lost:
+
+- Buffered samples are written to storage at least every `TelemetryConfiguration.checkpointInterval` (30 s by default), even when no new samples arrive.
+- `recorder.checkpoint()` writes buffered samples immediately. Call it when the app moves to the background:
+
+  ```dart
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      unawaited(recorder.checkpoint());
+    }
+  }
+  ```
+
+- On the next start, `recorder.recoverInterruptedTrips()` (or `TelemetryTripRecovery(store).recover()`) closes every trip still marked `recording`. It ends the trip at its last persisted chunk, writes a trip manifest artifact with `recovered: true`, and leaves the chunks queued for upload. Recovery is idempotent and never touches the recorder's own trip. Do not run it while another isolate may still be recording.
+
+## Performance
+
+- `SqliteTelemetryStore` keeps trips, chunk state and compressed payloads in one WAL-mode database. Each write is one transaction instead of a rewrite of the whole trip manifest, pending uploads come from an index, and several isolates can open the database at once.
+- gzip and SHA-256 run before the store takes its lock, and in a background isolate for payloads of 16 KiB or more (`PayloadCompressor.isolateThresholdBytes`), so writing a chunk does not drop UI frames.
+
+## Battery
+
+- With `pauseMotionWhenStationary` (on by default), motion sensors stop after the vehicle has stayed at or below `stationarySpeedKph` for `stationaryDuration` (2 min), for example at a long red light or in a parking lot. They resume when GPS speed reaches `resumeMotionSpeedKph` or the phone moves more than 50 m. GPS keeps running throughout, so no movement is missed.
+- `GeolocatorLocationSource` uses a 1 s fused-location interval on Android and the automotive navigation activity type on iOS, which lets the OS optimize GPS power for driving.
+- GPS settings are not changed during a trip. Restarting the location stream in the background stops the Android foreground service and can suspend an iOS app, which would end recording.
 
 ## Backend synchronization
 
@@ -143,6 +182,40 @@ final recorder = DrivingTelemetryRecorder(
 await recorder.synchronizePendingData();
 ```
 
+Failed chunks are retried with exponential backoff and jitter (`UploadRetryPolicy`, 30 s doubling to 1 h by default). A pass stops early after a network error, a timeout or an HTTP 429 or 503, instead of trying every queued chunk against a backend it cannot reach. `TelemetrySyncResult` reports `deferred`, `remaining` and `interrupted` counts.
+
+### Scheduling uploads
+
+While the app runs, `TelemetrySyncScheduler` uploads every 5 minutes, backs off after failures and syncs immediately when connectivity returns:
+
+```dart
+final scheduler = TelemetrySyncScheduler(
+  synchronizer: synchronizer,
+  connectivity: Connectivity()
+      .onConnectivityChanged
+      .map((results) => !results.contains(ConnectivityResult.none)),
+)..start();
+```
+
+For uploads while the app is suspended or closed, register an OS background task (WorkManager on Android, `BGTaskScheduler` on iOS) and call `runBackgroundTelemetrySync`. It stops starting new uploads after its time budget (25 s by default) and returns `false` so the OS retries later:
+
+```dart
+@pragma('vm:entry-point')
+void callbackDispatcher() {
+  Workmanager().executeTask((task, input) async {
+    final store = SqliteTelemetryStore();
+    final synchronizer = TelemetrySynchronizer(store: store, backend: backend);
+    try {
+      return await runBackgroundTelemetrySync(synchronizer);
+    } finally {
+      await store.close();
+    }
+  });
+}
+```
+
+Use `SqliteTelemetryStore` when uploads run in a background isolate. `FileTelemetryStore` has no cross-isolate locking. Uploads are idempotent, so a chunk sent from two isolates at once is acknowledged as a duplicate.
+
 ### Upload contract
 
 The default HTTP client sends the compressed payload as `application/octet-stream` with `content-encoding: gzip`.
@@ -170,6 +243,10 @@ The backend should return a 2xx status for an accepted upload or a duplicate wit
 The optional [Convex backend](docs/CONVEX_BACKEND.md) accepts this upload contract and adds trip location search and GPS replay. The guide includes local and cloud setup, authentication and a smoke test.
 
 ## Local storage structure
+
+`SqliteTelemetryStore` (recommended) stores everything in `driving_telemetry/telemetry.db`: a `trips` table and a `chunks` table holding chunk metadata, upload state and the compressed payload. Deleting an uploaded chunk clears its payload and keeps its row.
+
+`FileTelemetryStore` uses one directory per trip:
 
 ```text
 driving_telemetry/
@@ -304,24 +381,20 @@ Add location and foreground-service permissions as appropriate for the host appl
 <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 ```
 
-`GeolocatorLocationSource` accepts any `LocationSettings`. The host application can supply Android-specific settings with a foreground notification:
+Pass `BackgroundLocationOptions` to run location updates in a foreground service with a persistent notification and a wake lock, so recording continues with the screen off:
 
 ```dart
 final source = GeolocatorLocationSource(
-  locationSettings: AndroidSettings(
-    accuracy: LocationAccuracy.bestForNavigation,
-    distanceFilter: 0,
-    intervalDuration: const Duration(seconds: 1),
-    foregroundNotificationConfig: const ForegroundNotificationConfig(
-      notificationTitle: 'Driving analysis active',
-      notificationText: 'Trip telemetry is being recorded securely.',
-      enableWakeLock: true,
-    ),
+  background: const BackgroundLocationOptions(
+    notificationTitle: 'Driving analysis active',
+    notificationText: 'Trip telemetry is being recorded securely.',
   ),
 );
 ```
 
-Add `geolocator_android` as a direct host-application dependency when importing `AndroidSettings`.
+Start trips while the app is in the foreground. Android 12 and later do not allow a foreground service to start from the background. A trip started in the foreground keeps running with "While in use" permission; set `requireAlwaysPermission: true` only if trips start from the background.
+
+`GeolocatorLocationSource` still accepts any `LocationSettings` through `locationSettings`, which overrides the defaults above.
 
 ## iOS configuration
 
@@ -336,9 +409,18 @@ Add:
 <string>Motion sensors are used to record driving telemetry.</string>
 ```
 
-Enable the `Location updates` background mode in Xcode when background recording is required.
+Enable the `Location updates` background mode in Xcode when background recording is required:
 
-The host application can supply `AppleSettings` to `GeolocatorLocationSource`. iOS controls background execution and may suspend motion processing depending on application state and system policy. Location background capability does not guarantee unrestricted sensor execution.
+```xml
+<key>UIBackgroundModes</key>
+<array>
+  <string>location</string>
+  <string>fetch</string>
+  <string>processing</string>
+</array>
+```
+
+`fetch` and `processing` are needed only for background uploads with `BGTaskScheduler`. With `BackgroundLocationOptions`, `GeolocatorLocationSource` sets `allowsBackgroundLocationUpdates`, turns off automatic pausing and shows the blue background-location indicator. iOS controls background execution and may suspend motion processing depending on application state and system policy. Location background capability does not guarantee unrestricted sensor execution.
 
 ## Candidate events
 

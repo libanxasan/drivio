@@ -84,7 +84,14 @@ class TelemetryConfiguration {
     this.minimumSpeedingDuration = const Duration(seconds: 5),
     this.retainContinuousChunksAfterUpload = false,
     this.retainEventEvidenceAfterUpload = true,
+    this.checkpointInterval = const Duration(seconds: 30),
+    this.pauseMotionWhenStationary = true,
+    this.stationarySpeedKph = 3,
+    this.stationaryDuration = const Duration(minutes: 2),
+    this.resumeMotionSpeedKph = 8,
   })  : assert(locationDistanceFilterMeters >= 0),
+        assert(stationarySpeedKph >= 0),
+        assert(resumeMotionSpeedKph >= stationarySpeedKph),
         assert(maximumLocationAccuracyMeters > 0),
         assert(maximumPlausibleSpeedKph > 0),
         assert(chunkMaximumEstimatedBytes > 0),
@@ -121,6 +128,8 @@ class TelemetryConfiguration {
     requirePositive(minimumEventDuration, 'minimumEventDuration');
     requireNonNegative(eventCooldown, 'eventCooldown');
     requirePositive(minimumSpeedingDuration, 'minimumSpeedingDuration');
+    requirePositive(checkpointInterval, 'checkpointInterval');
+    requirePositive(stationaryDuration, 'stationaryDuration');
   }
 
   /// Requested sensor sampling period.
@@ -188,4 +197,24 @@ class TelemetryConfiguration {
 
   /// Whether uploaded event evidence remains on the device.
   final bool retainEventEvidenceAfterUpload;
+
+  /// Longest time buffered continuous telemetry stays only in memory.
+  ///
+  /// A timer flushes buffered samples at this interval even when no new
+  /// samples arrive, which bounds data loss if the OS kills the app.
+  final Duration checkpointInterval;
+
+  /// Whether motion sensors are paused while the vehicle is stationary.
+  ///
+  /// GPS keeps running, so recording resumes as soon as the vehicle moves.
+  final bool pauseMotionWhenStationary;
+
+  /// Valid GPS speed at or below which the vehicle counts as stationary.
+  final double stationarySpeedKph;
+
+  /// Time the vehicle must stay stationary before motion sensors pause.
+  final Duration stationaryDuration;
+
+  /// Valid GPS speed at or above which paused motion sensors resume.
+  final double resumeMotionSpeedKph;
 }

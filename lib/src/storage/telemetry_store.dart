@@ -68,6 +68,9 @@ abstract interface class TelemetryStore {
   /// Reads a manifest.
   Future<TripManifest> readManifest(String tripId);
 
+  /// Lists every stored trip, newest first.
+  Future<List<TripManifest>> listTrips();
+
   /// Lists chunks eligible to upload, including interrupted attempts.
   Future<List<PendingTelemetryChunk>> listPendingChunks();
 

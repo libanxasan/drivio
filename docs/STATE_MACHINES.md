@@ -29,11 +29,13 @@ The binary reader and writer maintain a cursor and delta bases for a single payl
 
 Read `recorder.state` for the initial value and listen to `recorder.states` for subsequent transitions. On an idle state, check `recorder.canRetryTripSave` before offering a new trip. When it is true, call `stopTrip()` again to finish the same trip. A retry preserves the original end time and skips completed steps. A successful stop returns the usual `TelemetryTripResult` and permits another trip.
 
-Call and await `dispose()` from the recorder owner. Disposal during startup or saving joins the in-flight operation, then closes the recorder streams. It attempts to save an active trip or a pending save if none is already in progress. Keep the recorder alive while presenting a retry to the user. After process death, successfully persisted files are the starting point for recovery.
+Call and await `dispose()` from the recorder owner. Disposal during startup or saving joins the in-flight operation, then closes the recorder streams. It attempts to save an active trip or a pending save if none is already in progress. Keep the recorder alive while presenting a retry to the user. After process death, call `recoverInterruptedTrips()` at the next start. It closes every trip still marked `recording` at its last persisted chunk and writes a recovery manifest artifact. Buffered samples reach storage at least every `checkpointInterval`, and `checkpoint()` flushes them when the app goes to the background.
+
+While recording, motion sensors move between active and paused. They pause after `stationaryDuration` at or below `stationarySpeedKph` and resume at `resumeMotionSpeedKph` or after 50 m of movement. Pending sensor start and stop calls are serialized and skipped once the trip leaves `recording`.
 
 ## Upload integration
 
-Use one store instance for a queue within an isolate. `synchronize()` can run before the first trip and retries interrupted uploads from disk with the original idempotency key. An upload or acknowledgement failure increments `failed`. A local cleanup failure increments `cleanupFailed` and leaves the chunk marked `uploaded`. The caller owns retry scheduling.
+Use one store instance for a queue within an isolate. `synchronize()` can run before the first trip and retries interrupted uploads from disk with the original idempotency key. An upload or acknowledgement failure increments `failed`. A local cleanup failure increments `cleanupFailed` and leaves the chunk marked `uploaded`. A failed chunk is skipped until its `UploadRetryPolicy` delay has passed, and a pass ends early after a network failure, a timeout, a 429 or a 503. `TelemetrySyncScheduler` owns foreground scheduling: idle → passing → waiting for the interval or a backoff delay, and offline (no timer) until connectivity returns. OS background tasks call `runBackgroundTelemetrySync` with a time budget.
 
 ## Regression checks
 
