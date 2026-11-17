@@ -1,0 +1,100 @@
+# Codemagic workflows for the driving_telemetry package and the Drivio example app.
+# Docs: https://docs.codemagic.io/yaml-basic-configuration/yaml-getting-started/
+#
+# Optional upload settings for the example app: create an environment variable
+# group named "drivio" in Codemagic (Team settings or App settings > Environment
+# variables) with DRIVIO_UPLOAD_URL, DRIVIO_USER_ID and DRIVIO_AUTH_TOKEN (mark
+# the token secure), then add `groups: [drivio]` under `environment` in the
+# build workflows below. Without them the app records locally with uploads off.
+
+definitions:
+  environment: &flutter_env
+    flutter: stable
+  scripts:
+    - &example_dependencies
+      name: Get example dependencies
+      working_directory: example
+      script: flutter pub get
+
+workflows:
+  # Runs on every push and pull request: analyzer plus package and example tests.
+  tests:
+    name: Package and example tests
+    instance_type: mac_mini_m2
+    max_build_duration: 30
+    environment:
+      <<: *flutter_env
+    triggering:
+      events:
+        - push
+        - pull_request
+      cancel_previous_builds: true
+    scripts:
+      - name: Package analyze and tests
+        script: |
+          flutter pub get
+          flutter analyze --no-fatal-infos
+          flutter test --reporter expanded
+      - *example_dependencies
+      - name: Example tests
+        working_directory: example
+        script: flutter test --reporter expanded
+
+  # Debug APK you can install directly on an Android phone. No signing needed.
+  android-debug:
+    name: Example app - Android debug APK
+    instance_type: mac_mini_m2
+    max_build_duration: 45
+    environment:
+      <<: *flutter_env
+      java: 17
+    scripts:
+      - *example_dependencies
+      - name: Build debug APK
+        working_directory: example
+        script: |
+          flutter build apk --debug \
+            --dart-define=DRIVIO_UPLOAD_URL=${DRIVIO_UPLOAD_URL:-} \
+            --dart-define=DRIVIO_USER_ID=${DRIVIO_USER_ID:-example-user} \
+            --dart-define=DRIVIO_AUTH_TOKEN=${DRIVIO_AUTH_TOKEN:-}
+    artifacts:
+      - example/build/app/outputs/flutter-apk/*.apk
+
+  # Signed iOS build uploaded to TestFlight. Requires an Apple Developer
+  # account and an App Store Connect API key added to Codemagic as an
+  # integration (Team settings > Integrations > Developer Portal). Replace
+  # the integration name below with yours, and create the app in App Store
+  # Connect with bundle ID dev.drivio.drivingTelemetryExample first.
+  ios-testflight:
+    name: Example app - iOS TestFlight
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    integrations:
+      app_store_connect: codemagic-api-key
+    environment:
+      <<: *flutter_env
+      xcode: latest
+      cocoapods: default
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: dev.drivio.drivingTelemetryExample
+    scripts:
+      - *example_dependencies
+      - name: Apply signing profiles
+        script: xcode-project use-profiles
+      - name: Build IPA
+        working_directory: example
+        script: |
+          flutter build ipa --release \
+            --build-number=$BUILD_NUMBER \
+            --export-options-plist=/Users/builder/export_options.plist \
+            --dart-define=DRIVIO_UPLOAD_URL=${DRIVIO_UPLOAD_URL:-} \
+            --dart-define=DRIVIO_USER_ID=${DRIVIO_USER_ID:-example-user} \
+            --dart-define=DRIVIO_AUTH_TOKEN=${DRIVIO_AUTH_TOKEN:-}
+    artifacts:
+      - example/build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true

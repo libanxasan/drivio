@@ -46,6 +46,18 @@ The defines are compile-time constants so the background upload isolate sees the
 3. With uploads on, enable airplane mode, record a trip, then turn the network back on. The upload card should report the upload within seconds.
 4. Stay parked for more than two minutes while recording: the "Sensors paused" chip appears and disappears when you drive off.
 
+## Building with Codemagic
+
+[`codemagic.yaml`](../codemagic.yaml) at the repository root defines three workflows:
+
+| Workflow | What it does | Needs |
+| --- | --- | --- |
+| `tests` | Analyzer plus package and example tests, on every push and pull request | Nothing |
+| `android-debug` | Debug APK to install directly on a phone | Nothing |
+| `ios-testflight` | Signed build uploaded to TestFlight | Apple Developer account and an App Store Connect API key integration |
+
+To enable uploads in those builds, add a `drivio` environment variable group with `DRIVIO_UPLOAD_URL`, `DRIVIO_USER_ID` and `DRIVIO_AUTH_TOKEN`, and reference it from the workflow.
+
 ## Tests
 
 ```sh
