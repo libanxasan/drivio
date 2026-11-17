@@ -10,6 +10,9 @@ dependencies:
     sdk: flutter
   driving_telemetry:
     path: ../
+  workmanager: ^0.10.10
+  # 7.3.2 needs dbus 0.8, which conflicts with geolocator_linux.
+  connectivity_plus: ">=7.3.1 <7.3.2"
 
 dev_dependencies:
   flutter_lints: ^5.0.0
