@@ -2,6 +2,8 @@
 
 The Convex backend accepts the Flutter package's gzip upload contract. It stores accepted chunks in Convex File Storage and uses the authenticated user's issuer and subject to scope trips, duplicate receipts and component queries. Existing hosts opt in by setting their upload endpoint.
 
+DriVio's own clients sign in anonymously with [Convex Auth](https://labs.convex.dev/auth) (`auth:signIn` with `provider: "anonymous"`). The token subject is `<userId>|<sessionId>`; uploads send the user id part as `X-User-Id`. Live streams, gaps, backfill and retention are described in [`APPS.md`](APPS.md).
+
 ## Install and register
 
 Use Node.js 22 or later and run commands from the repository root. Both components and the Convex CLI are pinned in `package.json` and `package-lock.json`. On this branch install the locked dependencies with `npm ci`.
@@ -32,52 +34,45 @@ Neither component requires an API key or component-specific environment variable
 
 | Variable | Where | Required or default |
 | --- | --- | --- |
-| `DRIVIO_AUTH_ISSUER` | Convex deployment | Required for authenticated uploads and queries. Use the access token's exact `iss`, for example `https://<project-ref>.supabase.co/auth/v1`. Without an issuer the backend deploys with no accepted JWT provider. |
-| `DRIVIO_AUTH_ALGORITHM` | Convex deployment | Defaults to `ES256`. Set `RS256` when the issuer signs with RS256. Supabase's legacy HS256 signing does not work with this Convex custom JWT provider. |
-| `DRIVIO_AUTH_AUDIENCE` | Convex deployment | Defaults to `authenticated`. Set it to the actual access token audience if different. |
-| `DRIVIO_AUTH_JWKS` | Convex deployment | Defaults to the issuer URL plus `/.well-known/jwks.json`. Set it if the issuer publishes its public keys elsewhere. |
+| `JWT_PRIVATE_KEY`, `JWKS` | Convex deployment | Required. Convex Auth's RS256 signing key (PKCS#8, newlines replaced by spaces) and its public JWKS. Generate them as in the [Convex Auth manual setup](https://labs.convex.dev/auth/setup/manual). |
+| `SITE_URL` | Convex deployment | Required by Convex Auth. The deployment's `.convex.site` URL is enough for anonymous sign-in. |
+| `ARCHIVE_PERIOD` | Convex deployment | Optional retention (`30d`, `12h`, `90m` or milliseconds). Unset keeps everything. |
+| Application variables | Convex deployment | See [`APPS.md`](APPS.md), for example `TAXI_XPRESS_AUTH_ISSUER`. |
 | `GEOSPATIAL_LOG_LEVEL` | Convex deployment | Optional. Geospatial defaults to `INFO`. |
-| `CONVEX_DEPLOY_KEY` | CI or deploy shell | Required for noninteractive cloud deployments without a CLI login. Use a preview key for preview deployment and the correct production key for production. |
+| `CONVEX_DEPLOY_KEY` | CI or deploy shell | Required for noninteractive cloud deployments without a CLI login. |
 | `CONVEX_DEPLOYMENT` | Local CLI `.env.local` | Set by Convex when selecting or creating a development deployment. |
-| `CONVEX_SITE_URL` | Flutter host configuration | HTTP Actions base URL for uploads, typically `https://<deployment>.convex.site`. The local smoke test reads this from `.env.local` when present. |
-| `CONVEX_URL` | Client configuration | Deployment base URL for `POST /api/query`, typically `https://<deployment>.convex.cloud`. The local smoke test reads this from `.env.local`. |
+| `CONVEX_SITE_URL` | Flutter host configuration | HTTP Actions base URL for uploads, typically `https://<deployment>.convex.site`. |
+| `CONVEX_URL` | Client configuration | Deployment base URL for `/api/query`, `/api/mutation` and `/api/action`, typically `https://<deployment>.convex.cloud`. |
 | `CONVEX_AGENT_MODE` | Local CLI shell | Set to `anonymous` for the disposable local verification below. |
-| `CONVEX_SELF_HOSTED_URL` | Local smoke-test shell | Optional. Point to a disposable self-hosted backend on loopback in place of an anonymous deployment. Supply `CONVEX_SITE_URL` when it uses a different port from the default. |
+| `CONVEX_SELF_HOSTED_URL` | Local smoke-test shell | Optional. Point to a disposable self-hosted backend on loopback. |
+| `DRIVIO_SMOKE_REMOTE` | Smoke-test shell | Set to `1` to run `npm run test:convex` against a cloud deployment. It writes test trips there. |
 
-Convex validates bearer tokens with the configured public keys. The token subject must equal the Flutter recorder's `userId` and the `X-User-Id` request header. With an existing Supabase host, use the current user's ID and current session access token. [Convex custom JWT configuration](https://docs.convex.dev/auth/advanced/custom-jwt) · [Supabase JWT verification](https://supabase.com/docs/guides/auth/jwts)
+Convex validates bearer tokens with the configured public keys. The `X-User-Id` header must equal the user id in the token subject.
 
 ## Verify locally
 
-Run in a fresh checkout for a disposable deployment with synthetic trips. The first Convex CLI run downloads the local backend. `--prepare` creates a test-only key and environment file under `.convex/`.
+Run in a fresh checkout for a disposable deployment with synthetic trips. The first Convex CLI run downloads the local backend.
 
 ```bash
 npm ci
 CONVEX_AGENT_MODE=anonymous npx convex dev --once
 npm run check
-npm run test:convex -- --prepare
-CONVEX_AGENT_MODE=anonymous npx convex env set --from-file .convex/drivio-smoke-auth.env
+# set JWT_PRIVATE_KEY, JWKS and SITE_URL on the local deployment (Convex Auth manual setup)
 CONVEX_AGENT_MODE=anonymous npm run dev
 ```
 
 Leave `npm run dev` running. In a second terminal at the repository root run `npm run test:convex`. It sends gzip DTL1 and JSON chunks to the real HTTP action and checks authentication, owner isolation, checksums, duplicate and conflicting uploads, radius filtering, replay pagination and out-of-order arrival. For the Flutter regression suite, run `flutter analyze` and `flutter test` at the root, then `flutter test` in `example/`.
 
-For a disposable self-hosted Convex backend on loopback, export its `CONVEX_SELF_HOSTED_URL`, `CONVEX_SELF_HOSTED_ADMIN_KEY` and `CONVEX_SITE_URL`. Run `npm run test:convex -- --prepare`, `npx convex env set --from-file .convex/drivio-smoke-auth.env`, `npx convex deploy --yes --typecheck enable`, and `npm run test:convex` against that backend. [Convex self-hosting](https://docs.convex.dev/self-hosting)
+For a disposable self-hosted Convex backend on loopback, export its `CONVEX_SELF_HOSTED_URL`, `CONVEX_SELF_HOSTED_ADMIN_KEY` and `CONVEX_SITE_URL`. Set the Convex Auth variables, run `npx convex deploy --yes --typecheck enable`, and `npm run test:convex` against that backend. [Convex self-hosting](https://docs.convex.dev/self-hosting)
 
-## Deploy and verify a cloud preview
+## Deploy and verify a cloud deployment
 
-1. In the intended Convex project, set preview defaults for the `DRIVIO_AUTH_*` variables in **Project Settings > Environment Variables**. For an existing preview, apply the values to that deployment. Use a test issuer or test user with an asymmetric signing key. [Project environment variable defaults](https://docs.convex.dev/production/environment-variables#project-environment-variable-defaults)
-2. Set `CONVEX_DEPLOY_KEY` from the project's preview deploy key in the shell or CI secret store. Run `npm ci`, `npm run check`, then `npx convex deploy --preview-name drivio-convex-components`. Retrieve the two URLs from that preview deployment's settings. [Convex preview deployments](https://docs.convex.dev/production/multiple-deployments#using-preview-deployments)
-3. Set the Flutter `HttpTelemetryBackendClient.endpoint` to `<CONVEX_SITE_URL>/v1/telemetry/chunks` and supply the existing token callback. Record and stop a short test trip, then call `synchronizePendingData()`. Check for successful upload receipts and retry the same test payload to confirm the duplicate response. The endpoint accepts up to 4 MiB compressed and 8 MiB decompressed per chunk.
-4. With the same access token, call each read function using the deployment URL. Replace the sample coordinates and trip ID with the test trip's values. Verify the location and GPS timestamps, then repeat the calls with a second test user's token and check that the original trip is absent. [Convex HTTP API](https://docs.convex.dev/http-api/)
+1. Set the variables above on the deployment, then run `npm ci`, `npm run check` and `npx convex dev --once` (dev) or `npx convex deploy` (prod).
+2. Run `DRIVIO_SMOKE_REMOTE=1 npm run test:convex` and `npx tsx scripts/stream-smoke.ts` from the repository root. The first checks the upload contract with two anonymous users; the second streams with a 20 minute gap, uploads the archive and checks that backfill restores it.
+3. Run the example app with `--dart-define=DRIVIO_CONVEX_URL=<CONVEX_URL>`. It signs in anonymously, streams and uploads; see [`example/README.md`](../example/README.md).
 
 ```bash
 curl -fsS "$CONVEX_URL/api/query" \
   -H "Authorization: Bearer $ACCESS_TOKEN" -H 'Content-Type: application/json' \
-  --data '{"path":"telemetry:nearby","args":{"latitude":11.5729,"longitude":43.1456,"radiusMeters":1000},"format":"json"}'
-
-curl -fsS "$CONVEX_URL/api/query" \
-  -H "Authorization: Bearer $ACCESS_TOKEN" -H 'Content-Type: application/json' \
   --data '{"path":"telemetry:history","args":{"tripId":"your-test-trip-id"},"format":"json"}'
 ```
-
-For production, set the auth variables on the production deployment and use its deploy key or a logged-in CLI with `npx convex deploy`. Switch a host's upload endpoint after verifying the intended deployment. Historical uploads from another backend require a separate migration.

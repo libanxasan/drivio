@@ -1,11 +1,12 @@
 # Codemagic workflows for the driving_telemetry package and the Drivio example app.
 # Docs: https://docs.codemagic.io/yaml-basic-configuration/yaml-getting-started/
 #
-# Optional upload settings for the example app: create an environment variable
-# group named "drivio" in Codemagic (Team settings or App settings > Environment
-# variables) with DRIVIO_UPLOAD_URL, DRIVIO_USER_ID and DRIVIO_AUTH_TOKEN (mark
-# the token secure), then add `groups: [drivio]` under `environment` in the
-# build workflows below. Without them the app records locally with uploads off.
+# Optional backend for the example app: create an environment variable group
+# named "drivio" in Codemagic (Team settings or App settings > Environment
+# variables) with DRIVIO_CONVEX_URL (https://<deployment>.convex.cloud), then add
+# `groups: [drivio]` under `environment` in the build workflows below. The app
+# signs in anonymously, so no token is needed. Without it the app records locally
+# with streaming and uploads off.
 
 definitions:
   environment: &flutter_env
@@ -54,9 +55,7 @@ workflows:
         working_directory: example
         script: |
           flutter build apk --debug \
-            --dart-define=DRIVIO_UPLOAD_URL=${DRIVIO_UPLOAD_URL:-} \
-            --dart-define=DRIVIO_USER_ID=${DRIVIO_USER_ID:-example-user} \
-            --dart-define=DRIVIO_AUTH_TOKEN=${DRIVIO_AUTH_TOKEN:-}
+            --dart-define=DRIVIO_CONVEX_URL=${DRIVIO_CONVEX_URL:-}
     artifacts:
       - example/build/app/outputs/flutter-apk/*.apk
 
@@ -88,9 +87,7 @@ workflows:
           flutter build ipa --release \
             --build-number=$BUILD_NUMBER \
             --export-options-plist=/Users/builder/export_options.plist \
-            --dart-define=DRIVIO_UPLOAD_URL=${DRIVIO_UPLOAD_URL:-} \
-            --dart-define=DRIVIO_USER_ID=${DRIVIO_USER_ID:-example-user} \
-            --dart-define=DRIVIO_AUTH_TOKEN=${DRIVIO_AUTH_TOKEN:-}
+            --dart-define=DRIVIO_CONVEX_URL=${DRIVIO_CONVEX_URL:-}
     artifacts:
       - example/build/ios/ipa/*.ipa
       - /tmp/xcodebuild_logs/*.log

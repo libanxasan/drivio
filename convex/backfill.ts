@@ -175,3 +175,23 @@ export const wake = internalMutation({
     return null;
   },
 });
+
+/**
+ * Operator check: can this deployment read an app's archive? Queries a window
+ * for an owner that has no data, so only reachability and the key are tested.
+ * Run with `npx convex run backfill:checkArchive '{"app":"taxi-xpress"}'`.
+ */
+export const checkArchive = internalAction({
+  args: { app: v.string() },
+  returns: v.object({ configured: v.boolean(), ok: v.boolean(), error: v.optional(v.string()) }),
+  handler: async (_ctx, { app }) => {
+    const source = archiveSourceFor(app);
+    if (!source) return { configured: false, ok: false };
+    try {
+      const found = await source.find("archive-check|archive-check", 0, 1);
+      return found === null ? { configured: false, ok: false } : { configured: true, ok: true };
+    } catch (error) {
+      return { configured: true, ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  },
+});

@@ -1,55 +1,18 @@
 import assert from "node:assert/strict";
-import { createHash, generateKeyPairSync, randomUUID, sign } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { parseEnv } from "node:util";
 import { gzipSync } from "node:zlib";
 
-const issuer = "https://auth.drivio.test";
-const keyPath = ".convex/drivio-smoke-private.pem";
-const keyId = "drivio-local-smoke";
-
-if (process.argv.includes("--prepare")) {
-  const { privateKey, publicKey } = generateKeyPairSync("ec", {
-    namedCurve: "P-256",
-  });
-  const jwks = {
-    keys: [
-      {
-        ...publicKey.export({ format: "jwk" }),
-        kid: keyId,
-        alg: "ES256",
-        use: "sig",
-      },
-    ],
-  };
-  const data = Buffer.from(JSON.stringify(jwks)).toString("base64");
-  await mkdir(".convex", { recursive: true });
-  await writeFile(
-    keyPath,
-    privateKey.export({ type: "pkcs8", format: "pem" }),
-    { mode: 0o600 },
-  );
-  await writeFile(
-    ".convex/drivio-smoke-auth.env",
-    [
-      `DRIVIO_AUTH_ISSUER=${issuer}`,
-      "DRIVIO_AUTH_ALGORITHM=ES256",
-      "DRIVIO_AUTH_AUDIENCE=authenticated",
-      `DRIVIO_AUTH_JWKS=data:text/plain;charset=utf-8;base64,${data}`,
-      "",
-    ].join("\n"),
-  );
-  console.log("Created local smoke-test auth configuration.");
-  process.exit(0);
-}
-
 const localOverride = process.env.CONVEX_SELF_HOSTED_URL;
 const env = localOverride ? {} : parseEnv(await readFile(".env.local", "utf8"));
-if (!localOverride) {
+// Smoke data stays on disposable deployments unless DRIVIO_SMOKE_REMOTE=1.
+const remote = process.env.DRIVIO_SMOKE_REMOTE === "1";
+if (!localOverride && !remote) {
   assert.match(
     env.CONVEX_DEPLOYMENT ?? "",
     /^anonymous[:-]/,
-    "Use a disposable anonymous Convex deployment",
+    "Use a disposable anonymous Convex deployment, or set DRIVIO_SMOKE_REMOTE=1",
   );
 }
 const cloud = new URL(localOverride ?? env.CONVEX_URL);
@@ -58,36 +21,33 @@ const site = new URL(
     env.CONVEX_SITE_URL ??
     `http://127.0.0.1:${Number(cloud.port) + 1}`,
 );
-for (const url of [cloud, site]) {
+for (const url of remote ? [] : [cloud, site]) {
   assert.ok(
     ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname),
     "Use local URLs for smoke data",
   );
 }
-const privateKey = await readFile(keyPath, "utf8");
-const owner = randomUUID();
-const other = randomUUID();
+// Two anonymous Convex Auth users. Their subject is the user id part of `sub`.
+const tokens = new Map();
+async function signIn() {
+  const response = await fetch(new URL("/api/action", cloud), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ path: "auth:signIn", args: { provider: "anonymous" }, format: "json" }),
+  });
+  const result = await response.json();
+  assert.equal(result.status, "success", JSON.stringify(result));
+  const jwt = result.value.tokens.token;
+  const subject = JSON.parse(Buffer.from(jwt.split(".")[1], "base64url").toString()).sub.split("|")[0];
+  tokens.set(subject, jwt);
+  return subject;
+}
+const owner = await signIn();
+const other = await signIn();
+const token = (subject) => tokens.get(subject);
 const tripId = `smoke-${randomUUID()}`;
 const startedAt = Date.UTC(2024, 0, 1);
 const origin = { latitude: 11.5729, longitude: 43.1456 };
-
-function token(subject) {
-  const encode = (value) =>
-    Buffer.from(JSON.stringify(value)).toString("base64url");
-  const now = Math.floor(Date.now() / 1_000);
-  const data = `${encode({ alg: "ES256", typ: "JWT", kid: keyId })}.${encode({
-    iss: issuer,
-    sub: subject,
-    aud: "authenticated",
-    iat: now,
-    exp: now + 600,
-  })}`;
-  const signature = sign("sha256", Buffer.from(data), {
-    key: privateKey,
-    dsaEncoding: "ieee-p1363",
-  });
-  return `${data}.${signature.toString("base64url")}`;
-}
 
 function continuousChunk(index, points, chunkId = `chunk-${index}`) {
   const bytes = [...Buffer.from("DTL1")];

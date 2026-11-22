@@ -354,7 +354,7 @@ class _UploadsCard extends StatelessWidget {
             if (!controller.uploadsEnabled)
               Text(
                 'Uploads are off. Run with '
-                '--dart-define=DRIVIO_UPLOAD_URL=<endpoint> to enable them.',
+                '--dart-define=DRIVIO_CONVEX_URL=<deployment URL> to enable them.',
                 style: theme.textTheme.bodySmall,
               )
             else ...<Widget>[

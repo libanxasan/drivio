@@ -6,6 +6,8 @@ A complete trip-recording app built on `driving_telemetry`. It shows how a produ
 - **Kill recovery.** At startup the app calls `recoverInterruptedTrips()` and shows a notice when a trip was closed after the OS killed the app. When the app goes to the background it calls `recorder.checkpoint()`, so a kill loses as little as possible.
 - **SQLite storage.** `SqliteTelemetryStore`, with a one-time import of trips recorded by older builds that used `FileTelemetryStore`.
 - **Uploads.** `TelemetrySyncScheduler` uploads while the app is open, backs off when the backend is unreachable and syncs as soon as connectivity returns (`connectivity_plus`). A WorkManager / BGTaskScheduler task calls `runBackgroundTelemetrySync` while the app is suspended or closed.
+- **Live stream to Convex.** With a Convex deployment configured, the app signs in anonymously (Convex Auth), streams GPS points, motion frames and events to `streams:publish` every 5 seconds, and uploads archive chunks to the same deployment. Items recorded while offline reach the stream later through backfill.
+- **Automatic recording.** With the switch on, GPS and the accelerometer start a trip when the phone is driving (15 km/h for 20 seconds and vehicle vibration) and stop it after 3 minutes still at walking speed or 10 minutes without a fix.
 - **Live screen.** Elapsed time, speed, GPS accuracy, fix and event counts, a "Sensors paused" chip while the vehicle is stationary, the saved trip summary, upload status and trip history.
 
 ## Run
@@ -15,23 +17,20 @@ cd example
 flutter run
 ```
 
-Recording works with no backend. To enable uploads, point the app at an endpoint that accepts the package's upload contract, for example the Convex backend in [`docs/CONVEX_BACKEND.md`](../docs/CONVEX_BACKEND.md):
+Recording works with no backend. To stream and upload, point the app at a Convex deployment set up as in [`docs/CONVEX_BACKEND.md`](../docs/CONVEX_BACKEND.md):
 
 ```sh
-flutter run \
-  --dart-define=DRIVIO_UPLOAD_URL=https://<deployment>.convex.site/v1/telemetry/chunks \
-  --dart-define=DRIVIO_USER_ID=<user id from your auth provider> \
-  --dart-define=DRIVIO_AUTH_TOKEN=<JWT>
+flutter run --dart-define=DRIVIO_CONVEX_URL=https://<deployment>.convex.cloud
 ```
 
 | Define | Default | Purpose |
 | --- | --- | --- |
-| `DRIVIO_UPLOAD_URL` | empty (uploads off) | Chunk upload endpoint |
-| `DRIVIO_USER_ID` | `example-user` | User stored with each trip and sent as `X-User-Id` |
-| `DRIVIO_AUTH_TOKEN` | empty | Bearer token for uploads |
+| `DRIVIO_CONVEX_URL` | empty (streaming and uploads off) | Convex deployment URL |
+| `DRIVIO_CONVEX_SITE_URL` | derived from `DRIVIO_CONVEX_URL` | HTTP actions URL for chunk uploads |
+| `DRIVIO_AUTOMATIC` | `true` | Start with automatic recording on |
 | `DRIVIO_MATCH_ROUTES` | `true` | Match finished trips against the public OSRM demo server |
 
-The defines are compile-time constants so the background upload isolate sees the same values. A real app should read the token from its auth session instead.
+The defines are compile-time constants so the background upload isolate sees the same values. The anonymous session is kept in the app's support directory and shared with the background isolate.
 
 ## Platform setup included
 
@@ -43,7 +42,7 @@ The defines are compile-time constants so the background upload isolate sees the
 
 1. Start a trip and lock the screen. Drive or walk for a few minutes, then stop the trip. GPS fixes should keep increasing while the screen is locked.
 2. Start a trip, background the app, then kill it from the app switcher. Reopen it: the recovered-trip notice appears and the trip is in the history as "Recovered".
-3. With uploads on, enable airplane mode, record a trip, then turn the network back on. The upload card should report the upload within seconds.
+3. With uploads on, enable airplane mode, record a trip, then turn the network back on. The upload card should report the upload within seconds, and the stream's gap is filled from the archive.
 4. Stay parked for more than two minutes while recording: the "Sensors paused" chip appears and disappears when you drive off.
 
 ## Building with Codemagic
@@ -56,7 +55,7 @@ The defines are compile-time constants so the background upload isolate sees the
 | `android-debug` | Debug APK to install directly on a phone | Nothing |
 | `ios-testflight` | Signed build uploaded to TestFlight | Apple Developer account and an App Store Connect API key integration |
 
-To enable uploads in those builds, add a `drivio` environment variable group with `DRIVIO_UPLOAD_URL`, `DRIVIO_USER_ID` and `DRIVIO_AUTH_TOKEN`, and reference it from the workflow.
+To enable streaming and uploads in those builds, add a `drivio` environment variable group with `DRIVIO_CONVEX_URL` and reference it from the workflow.
 
 ## Tests
 
