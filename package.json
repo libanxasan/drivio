@@ -12,17 +12,12 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@auth/core": "0.41.1",
-    "@convex-dev/auth": "0.0.98",
-    "@convex-dev/batched-replay": "0.1.1",
     "@convex-dev/geospatial": "0.2.1",
-    "convex": "1.50.0",
-    "pako": "^2.1.0"
+    "convex": "1.50.0"
   },
   "devDependencies": {
     "@edge-runtime/vm": "5.0.0",
     "@types/node": "^22.0.0",
-    "@types/pako": "^2.0.0",
     "convex-test": "0.0.71",
     "typescript": "~5.9.3",
     "vitest": "3.2.4"

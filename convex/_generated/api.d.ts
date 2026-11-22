@@ -9,13 +9,8 @@
  */
 
 import type * as apps from "../apps.js";
-import type * as auth from "../auth.js";
 import type * as http from "../http.js";
-import type * as identity from "../identity.js";
-import type * as inspectTelemetry from "../inspectTelemetry.js";
 import type * as taxiXpress from "../taxiXpress.js";
-import type * as telemetry from "../telemetry.js";
-import type * as telemetryFormat from "../telemetryFormat.js";
 
 import type {
   ApiFromModules,
@@ -25,13 +20,8 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   apps: typeof apps;
-  auth: typeof auth;
   http: typeof http;
-  identity: typeof identity;
-  inspectTelemetry: typeof inspectTelemetry;
   taxiXpress: typeof taxiXpress;
-  telemetry: typeof telemetry;
-  telemetryFormat: typeof telemetryFormat;
 }>;
 
 /**
@@ -61,7 +51,5 @@ export declare const internal: FilterApi<
 >;
 
 export declare const components: {
-  geospatial: import("@convex-dev/geospatial/_generated/component.js").ComponentApi<"geospatial">;
-  batchedReplay: import("@convex-dev/batched-replay/_generated/component.js").ComponentApi<"batchedReplay">;
   taxiXpress: import("../../apps/taxi-xpress/convex/_generated/component.js").ComponentApi<"taxiXpress">;
 };
