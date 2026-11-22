@@ -114,6 +114,8 @@ class DrivingTelemetryRecorder {
 
   final StreamController<TelemetryEventCandidate> _eventController =
       StreamController<TelemetryEventCandidate>.broadcast();
+  final StreamController<MotionFrame> _frameController =
+      StreamController<MotionFrame>.broadcast();
   final StreamController<Object> _errorController =
       StreamController<Object>.broadcast();
   final StreamController<TelemetryRecorderState> _stateController =
@@ -176,6 +178,10 @@ class DrivingTelemetryRecorder {
   /// Candidate events, exposed for optional diagnostics only.
   Stream<TelemetryEventCandidate> get candidateEvents =>
       _eventController.stream;
+
+  /// One-second motion frames of the current trip, as they are aggregated.
+  /// Useful to stream them live; they are also stored in continuous chunks.
+  Stream<MotionFrame> get motionFrames => _frameController.stream;
 
   /// Non-fatal recorder diagnostics and source stream errors.
   Stream<Object> get errors => _errorController.stream;
@@ -586,6 +592,7 @@ class DrivingTelemetryRecorder {
 
   void _registerFrame(MotionFrame frame) {
     _continuousFrames.add(frame);
+    if (!_frameController.isClosed) _frameController.add(frame);
     _motionFrameCount++;
     final hourly = _hourlyAggregator.addMotionFrame(frame);
     if (hourly != null) _enqueueHourly(hourly);
@@ -890,6 +897,7 @@ class DrivingTelemetryRecorder {
     await Future.wait<void>(<Future<void>>[
       _stateController.close(),
       _eventController.close(),
+      _frameController.close(),
       _errorController.close(),
     ]);
   }

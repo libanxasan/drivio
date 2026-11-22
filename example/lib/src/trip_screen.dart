@@ -53,7 +53,17 @@ class TripScreen extends StatelessWidget {
                 _RecordingCard(controller: controller),
                 if (controller.lastTrip != null && !controller.isRecording)
                   _LastTripCard(trip: controller.lastTrip!),
+                if (controller.automatic != null)
+                  SwitchListTile(
+                    title: const Text('Record drives automatically'),
+                    subtitle: const Text(
+                        'Starts and stops from GPS speed and motion'),
+                    value: controller.automaticEnabled,
+                    onChanged: controller.setAutomatic,
+                  ),
                 _UploadsCard(controller: controller),
+                if (controller.liveStream != null)
+                  _LiveStreamCard(controller: controller),
                 const SizedBox(height: 8),
                 _SectionTitle('Trips'),
                 if (controller.trips.isEmpty)
@@ -134,8 +144,8 @@ class _RecordingCard extends StatelessWidget {
       TelemetryRecorderState.idle => 'Ready',
     };
     final location = controller.lastLocation;
-    final canAct = !controller.isBusy &&
-        state != TelemetryRecorderState.disposed;
+    final canAct =
+        !controller.isBusy && state != TelemetryRecorderState.disposed;
 
     return Card(
       child: Padding(
@@ -244,9 +254,12 @@ class _LastTripCard extends StatelessWidget {
               style: Theme.of(context).textTheme.titleMedium,
             ),
             const SizedBox(height: 8),
-            _Row('Duration', _formatDuration(
-              Duration(milliseconds: trip.endedAtMillis - trip.startedAtMillis),
-            )),
+            _Row(
+                'Duration',
+                _formatDuration(
+                  Duration(
+                      milliseconds: trip.endedAtMillis - trip.startedAtMillis),
+                )),
             _Row('GPS distance', _formatDistance(trip.rawGpsDistanceMeters)),
             _Row(
               'Matched distance',
@@ -255,6 +268,48 @@ class _LastTripCard extends StatelessWidget {
             _Row('Events', '${trip.eventCount}'),
             _Row('Chunks', '${trip.chunkCount}'),
             _Row('Pending uploads', '${trip.pendingUploadCount}'),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _LiveStreamCard extends StatelessWidget {
+  const _LiveStreamCard({required this.controller});
+
+  final TripController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final stream = controller.liveStream!;
+    final last = stream.lastSentAt;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Row(
+              children: <Widget>[
+                Icon(stream.lastError == null
+                    ? Icons.sensors
+                    : Icons.sensors_off),
+                const SizedBox(width: 8),
+                Text('Live stream',
+                    style: Theme.of(context).textTheme.titleMedium),
+              ],
+            ),
+            const SizedBox(height: 8),
+            _Row('Items sent', '${stream.sent}'),
+            _Row(
+                'Last sent',
+                last == null
+                    ? 'Not yet'
+                    : TimeOfDay.fromDateTime(last).format(context)),
+            if (stream.lastError != null)
+              const Text(
+                  'Offline. The gap is filled from the archive once it uploads.'),
           ],
         ),
       ),

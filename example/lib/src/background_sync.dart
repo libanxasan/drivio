@@ -15,8 +15,12 @@ const String backgroundSyncTask = 'dev.drivio.example.telemetrySync';
 void backgroundSyncDispatcher() {
   Workmanager().executeTask((task, inputData) async {
     WidgetsFlutterBinding.ensureInitialized();
-    final backend = const ExampleConfig.fromEnvironment().createBackend();
-    if (backend == null) return true;
+    const config = ExampleConfig.fromEnvironment();
+    final session = config.createSession();
+    if (session == null) return true;
+    await session.restore();
+    if (session.userId == null) return true;
+    final backend = config.createBackend(session);
 
     // SQLite is safe to open from this isolate while the UI isolate also
     // has the database open.

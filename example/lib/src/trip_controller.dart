@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:driving_telemetry/driving_telemetry.dart';
 import 'package:flutter/widgets.dart';
 
+import 'live_stream.dart';
+
 /// Screen state for one recorder, separate from the widgets so it can be
 /// tested and reused.
 class TripController extends ChangeNotifier with WidgetsBindingObserver {
@@ -12,6 +14,8 @@ class TripController extends ChangeNotifier with WidgetsBindingObserver {
     required this.store,
     required this.userId,
     this.scheduler,
+    this.liveStream,
+    this.automatic,
     List<RecoveredTrip> recovered = const <RecoveredTrip>[],
     this.onDispose,
     DateTime Function()? clock,
@@ -29,6 +33,12 @@ class TripController extends ChangeNotifier with WidgetsBindingObserver {
 
   /// Foreground upload scheduler, or null when uploads are off.
   final TelemetrySyncScheduler? scheduler;
+
+  /// Live stream to Convex, or null when local only.
+  final LiveStreamPublisher? liveStream;
+
+  /// Automatic recording from GPS and accelerometer, or null when off.
+  final AutomaticTripRecorder? automatic;
 
   /// Called after the recorder is disposed, for example to close storage.
   final Future<void> Function()? onDispose;
@@ -54,6 +64,28 @@ class TripController extends ChangeNotifier with WidgetsBindingObserver {
 
   /// Recorder lifecycle state.
   TelemetryRecorderState get recorderState => recorder.state;
+
+  /// Whether automatic recording is running.
+  bool get automaticEnabled => automatic?.isRunning ?? false;
+
+  /// Turns automatic recording on or off.
+  Future<void> setAutomatic(bool enabled) async {
+    final automatic = this.automatic;
+    if (automatic == null) return;
+    try {
+      if (enabled) {
+        await automatic.start();
+      } else {
+        await automatic.stop();
+      }
+    } catch (error) {
+      _error = switch (error) {
+        LocationSourceException(:final message) => message,
+        _ => 'Automatic recording could not start.',
+      };
+    }
+    _notify();
+  }
 
   /// Whether a trip is being recorded.
   bool get isRecording => recorder.isRecording;
@@ -135,6 +167,12 @@ class TripController extends ChangeNotifier with WidgetsBindingObserver {
     if (scheduler != null) {
       _subscriptions.add(scheduler.results.listen(_onSync));
       scheduler.start();
+    }
+    liveStream?.start();
+    if (automatic != null) {
+      _subscriptions.add(automatic!.decisions
+          .listen((_) => unawaited(refreshTrips()), onError: (Object _) {}));
+      await setAutomatic(true);
     }
     await refreshTrips();
   }
@@ -258,6 +296,9 @@ class TripController extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> _shutDown() async {
+    await automatic?.stop();
+    await liveStream?.flush();
+    await liveStream?.stop();
     await scheduler?.dispose();
     await recorder.dispose();
     await onDispose?.call();
