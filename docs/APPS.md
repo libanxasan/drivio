@@ -1,8 +1,9 @@
 # Applications on the shared DriVio platform
 
-DriVio splits every application's data in two:
+DriVio splits every application's data in two. All applications share one Convex
+deployment (one component each); every application has its own Neon project.
 
-| | Convex (deployment `grateful-parakeet-783`) | Neon (project `drivio-platform`) |
+| | Convex (shared deployment `grateful-parakeet-783`) | Neon (one project per application) |
 | --- | --- | --- |
 | Holds | Live data only: tracking sessions, current positions, nearby search, later matching | Long-term data: users and sign-in, profiles, approvals, trip archives |
 | Knows about people | No. Only opaque ids from the application's tokens | Yes |
@@ -13,9 +14,12 @@ Convex, durable records (sign-in, profile, trip archives) go to Neon. The only c
 between them is a control message: Neon asks Convex to end a user's live sessions
 when, for example, an approval is revoked.
 
-| Application | Convex component | Neon | Repository (submodule) |
+| Application | Convex component | Neon project | Repository (submodule) |
 | --- | --- | --- | --- |
-| Taxi Xpress | `taxiXpress`, functions `taxiXpress:*` | Function `taxixpress`, schemas `taxi_xpress`, `taxi_xpress_auth`, archive in `drivio` | [`apps/taxi-xpress`](https://github.com/libanxasan/Taxi-Xpress-) |
+| Taxi Xpress | `taxiXpress`, functions `taxiXpress:*` | `taxi-xpress`: database `taxi_xpress`, function `taxixpress`, archive bucket | [`apps/taxi-xpress`](https://github.com/libanxasan/Taxi-Xpress-) |
+
+DriVio core can use its own Neon project (`drivio-platform`, empty for now) if it
+needs long-term storage of its own.
 
 ## How the Convex side fits together
 
@@ -35,14 +39,15 @@ An application's tokens are only accepted by that application's functions.
 
 The DriVio upload contract (`HttpTelemetryBackendClient`, see `docs/BINARY_FORMAT.md`)
 is unchanged, but archives are no longer stored in Convex. Each application's Neon
-function accepts uploads and stores payloads in Neon Object Storage with metadata in
-the shared `drivio` schema (`drivio.trips`, `drivio.chunks`). Taxi Xpress implements
-this in its `neon/` folder.
+function accepts uploads and stores payloads in its own Neon Object Storage bucket,
+with metadata in the DriVio archive tables (`drivio.trips`, `drivio.chunks`) of its
+own database. Taxi Xpress implements this in its `neon/` folder.
 
 ## Adding an application
 
 1. In the application repository: a Convex component with live data only (`convex/`),
-   host bindings (`host/`), and a Neon function for sign-in and long-term data.
+   host bindings (`host/`), and a Neon function for sign-in and long-term data in the
+   application's own Neon project.
 2. Here: `git submodule add -b <branch> <repo url> apps/<name>`, `app.use(...)` it in
    `convex/convex.config.ts`, add its providers to `convex/auth.config.ts`, register it
    in `convex/apps.ts`, and re-export its functions from `convex/<name>.ts`.
