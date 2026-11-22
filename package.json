@@ -8,17 +8,21 @@
   "scripts": {
     "dev": "convex dev",
     "check": "tsc --project convex/tsconfig.json",
-    "test:convex": "node scripts/convex-smoke.mjs"
+    "test:convex": "node scripts/convex-smoke.mjs",
+    "test": "vitest run"
   },
   "dependencies": {
     "@convex-dev/batched-replay": "0.1.1",
     "@convex-dev/geospatial": "0.2.1",
-    "convex": "1.49.0",
+    "convex": "1.50.0",
     "pako": "^2.1.0"
   },
   "devDependencies": {
+    "@edge-runtime/vm": "5.0.0",
     "@types/node": "^22.0.0",
     "@types/pako": "^2.0.0",
-    "typescript": "~5.9.3"
+    "convex-test": "0.0.71",
+    "typescript": "~5.9.3",
+    "vitest": "3.2.4"
   }
 }

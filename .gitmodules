@@ -1,0 +1,4 @@
+[submodule "apps/taxi-xpress"]
+	path = apps/taxi-xpress
+	url = https://github.com/libanxasan/Taxi-Xpress-.git
+	branch = ccr-9551860e-lkz5h4

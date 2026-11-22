@@ -1,5 +1,11 @@
 include: package:flutter_lints/flutter.yaml
 
+analyzer:
+  exclude:
+    # Application repositories mounted on the shared Convex deployment.
+    - apps/**
+    - build/**
+
 linter:
   rules:
     public_member_api_docs: true

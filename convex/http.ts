@@ -1,4 +1,6 @@
 import { httpRouter } from "convex/server";
+import type { GenericActionCtx, GenericDataModel, UserIdentity } from "convex/server";
+import { apps, belongsToApp } from "./apps";
 import { internal } from "./_generated/api";
 import { httpAction } from "./_generated/server";
 import { inspectUpload } from "./inspectTelemetry";
@@ -95,15 +97,26 @@ async function readCompressedBody(request: Request): Promise<ArrayBuffer> {
   return bytes.buffer;
 }
 
-const http = httpRouter();
+type Admission = (
+  ctx: GenericActionCtx<GenericDataModel>, identity: UserIdentity,
+) => Promise<Response | null>;
 
-http.route({
-  path: "/v1/telemetry/chunks",
-  method: "POST",
-  handler: httpAction(async (ctx, request) => {
+/**
+ * Archive upload handler shared by the core route and the application routes.
+ * `accepts` decides which identities may use the route; `admit` lets an
+ * application refuse or throttle before the chunk is read.
+ */
+function chunkUpload(accepts: (identity: UserIdentity) => boolean, admit?: Admission) {
+  return httpAction(async (ctx, request) => {
     const identity = await ctx.auth.getUserIdentity();
     if (!identity)
       return Response.json({ message: "Unauthorized" }, { status: 401 });
+    if (!accepts(identity)) {
+      return Response.json(
+        { message: "Use your application's upload route" },
+        { status: 403 },
+      );
+    }
     if (request.headers.get("x-user-id") !== identity.subject) {
       return Response.json(
         { message: "User identifier mismatch" },
@@ -112,6 +125,9 @@ http.route({
     }
 
     try {
+      const refusal = await admit?.(ctx, identity);
+      if (refusal) return refusal;
+
       const tripId = requiredHeader(request.headers, "x-trip-id");
       const chunk = readMetadata(request.headers);
       const key = request.headers.get("idempotency-key");
@@ -169,7 +185,24 @@ http.route({
         { status: 500 },
       );
     }
-  }),
+  });
+}
+
+const http = httpRouter();
+
+// Core route for DriVio's own clients. Application users must use their route.
+http.route({
+  path: "/v1/telemetry/chunks",
+  method: "POST",
+  handler: chunkUpload(identity => !belongsToApp(identity)),
 });
+
+for (const app of apps) {
+  http.route({
+    path: app.archivePath,
+    method: "POST",
+    handler: chunkUpload(identity => app.owns(identity), app.admitArchiveUpload),
+  });
+}
 
 export default http;
