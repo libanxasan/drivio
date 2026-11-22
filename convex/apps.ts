@@ -1,39 +1,38 @@
-import type {
-  GenericActionCtx, GenericDataModel, UserIdentity,
-} from "convex/server";
+import type { GenericActionCtx, GenericDataModel } from "convex/server";
 import { components } from "./_generated/api";
 import {
-  isTaxiXpressIdentity, taxiXpressArchiveAdmission, taxiXpressArchivePath,
+  taxiXpressApp, taxiXpressArchiveAdmission, taxiXpressArchivePath,
+  taxiXpressTelegramPath, taxiXpressTelegramWebhook,
 } from "../apps/taxi-xpress/host";
 
 /**
  * Applications mounted on the shared DriVio deployment. Each one is a Convex
  * component in its own repository (included under apps/<name>) and gets:
- * - its own auth provider in auth.config.ts,
+ * - its sign-in providers in convex/auth.ts, tagging its users with its name,
  * - public functions re-exported from convex/<appName>.ts,
  * - an archive upload route that runs its admission check, then stores the
- *   chunk in the shared DriVio archive.
- * Identities of an app are only accepted on that app's routes and functions.
+ *   chunk in the shared DriVio archive,
+ * - any extra HTTP routes it needs (webhooks).
+ * An application's users are only accepted by that application's functions
+ * and routes, and the core upload route refuses them.
  */
 export type DrivioApp = {
   name: string;
   archivePath: string;
-  owns: (identity: UserIdentity | null) => boolean;
   admitArchiveUpload: (
-    ctx: GenericActionCtx<GenericDataModel>, identity: UserIdentity,
+    ctx: GenericActionCtx<GenericDataModel>, owner: string,
   ) => Promise<Response | null>;
+  routes: { path: string; handler: ReturnType<typeof taxiXpressTelegramWebhook> }[];
 };
 
 export const apps: DrivioApp[] = [
   {
-    name: "taxi-xpress",
+    name: taxiXpressApp,
     archivePath: taxiXpressArchivePath,
-    owns: isTaxiXpressIdentity,
     admitArchiveUpload: taxiXpressArchiveAdmission(components.taxiXpress),
+    routes: [{
+      path: taxiXpressTelegramPath,
+      handler: taxiXpressTelegramWebhook(components.taxiXpress),
+    }],
   },
 ];
-
-/** True when the identity belongs to one of the mounted applications. */
-export function belongsToApp(identity: UserIdentity | null) {
-  return apps.some(app => app.owns(identity));
-}

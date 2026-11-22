@@ -12,19 +12,24 @@ archive.
 ## How it fits together
 
 - `convex/convex.config.ts` mounts each application component with `app.use(...)`.
-- `convex/auth.config.ts` adds each application's auth provider next to DriVio's own.
-- `convex/apps.ts` registers each application: which identities it owns and its
-  upload admission check. `convex/http.ts` gives each one an upload route that runs
-  that check, then the shared chunk validation and storage.
+- `convex/auth.ts` runs [Convex Auth](https://labs.convex.dev/auth) for every application.
+  Each application brings its sign-in providers; `convex/identity.ts` maps each provider
+  to its application, runs the application's check before a user is created, and tags
+  the user with the application name. Accounts are never linked across applications, so
+  the same phone number gives one user per application.
+- `convex/auth.config.ts` trusts Convex Auth's own tokens and DriVio core's tokens.
+- `convex/apps.ts` registers each application: its upload admission check and any extra
+  HTTP routes (webhooks). `convex/http.ts` gives each one an upload route that runs that
+  check, then the shared chunk validation and storage, and serves Convex Auth's JWKS.
 - `convex/<app>.ts` re-exports the application's public functions from the bindings
   in its repository (`host/`). Components cannot read the signed-in user, environment
   variables or serve HTTP, so the bindings read `ctx.auth` and pass the caller in.
 
-Identities are kept apart: an application's identity is accepted only by that
-application's functions and upload route, and the core upload route
-(`/v1/telemetry/chunks`) refuses identities that belong to an application. Archive
-records are keyed by the token identifier, which includes the issuer, so owners
-never collide across applications.
+Users are kept apart: an application's users are accepted only by that application's
+functions and upload route, and the core upload route (`/v1/telemetry/chunks`) refuses
+them. Convex Auth subjects are `<userId>|<sessionId>`, so archives are owned by
+`<issuer>|<userId>` (`principal()` in `convex/identity.ts`) and stay with the user
+across sessions. DriVio core tokens keep their token identifier.
 
 ## Adding an application
 
@@ -50,14 +55,17 @@ npx convex dev --once                           # dev deployment grateful-parake
 ```
 
 Convex refuses to deploy while `auth.config.ts` reads a variable that is not set on
-the deployment, even one with a default in code. Every auth variable must therefore be
-set: `DRIVIO_AUTH_ISSUER`, `DRIVIO_AUTH_ALGORITHM`, `DRIVIO_AUTH_AUDIENCE`,
-`DRIVIO_AUTH_JWKS`, and for Taxi Xpress `TAXI_XPRESS_AUTH_ISSUER`,
-`TAXI_XPRESS_AUTH_AUDIENCE`, `TAXI_XPRESS_AUTH_JWKS`. `TAXI_XPRESS_OPERATOR_SUBJECTS`
-is read at run time and may stay unset.
+the deployment, even one with a default in code, so `DRIVIO_AUTH_ISSUER`,
+`DRIVIO_AUTH_ALGORITHM`, `DRIVIO_AUTH_AUDIENCE` and `DRIVIO_AUTH_JWKS` must all be set.
+The dev deployment holds placeholders for DriVio core
+(`https://drivio-auth-not-configured.invalid`), so no core token is accepted yet.
 
-The dev deployment `grateful-parakeet-783` holds placeholders for both issuers
-(`https://drivio-auth-not-configured.invalid` and
-`https://taxi-xpress-auth-not-configured.invalid/api/auth`, with matching JWKS URLs),
-so no token is accepted yet. Replace them with `npx convex env set` once the auth
-servers are hosted; no redeploy is needed.
+Convex Auth needs `JWT_PRIVATE_KEY`, `JWKS` and `SITE_URL` (any URL; phone sign-in does
+not use it). They are set on the dev deployment. To rotate the keys, generate a new
+RS256 pair as in the [Convex Auth manual setup](https://labs.convex.dev/auth/setup/manual)
+and set both; existing sessions then have to sign in again.
+
+Taxi Xpress also needs `TAXI_XPRESS_TELEGRAM_BOT_TOKEN`, `TAXI_XPRESS_TELEGRAM_BOT_USERNAME`,
+`TAXI_XPRESS_TELEGRAM_WEBHOOK_SECRET`, `TAXI_XPRESS_PHONE_KEY_SECRET` and, for approvals,
+`TAXI_XPRESS_OPERATOR_SUBJECTS` (see its `docs/DRIVER_SETUP.md`). Changing a variable
+takes effect without a redeploy.

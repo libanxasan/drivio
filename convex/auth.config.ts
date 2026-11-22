@@ -1,5 +1,4 @@
 import type { AuthConfig } from "convex/server";
-import { taxiXpressAuthProviders } from "../apps/taxi-xpress/host/auth";
 
 const issuer = process.env.DRIVIO_AUTH_ISSUER;
 const algorithm = process.env.DRIVIO_AUTH_ALGORITHM ?? "ES256";
@@ -23,7 +22,10 @@ const core: Provider[] = issuer
     ]
   : [];
 
-// DriVio core tokens plus one provider per application component.
+// Convex Auth (applications on this deployment) plus DriVio core tokens.
 export default {
-  providers: [...core, ...taxiXpressAuthProviders()],
+  providers: [
+    { domain: process.env.CONVEX_SITE_URL!, applicationID: "convex" },
+    ...core,
+  ],
 } satisfies AuthConfig;

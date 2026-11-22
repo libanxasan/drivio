@@ -9,7 +9,9 @@
  */
 
 import type * as apps from "../apps.js";
+import type * as auth from "../auth.js";
 import type * as http from "../http.js";
+import type * as identity from "../identity.js";
 import type * as inspectTelemetry from "../inspectTelemetry.js";
 import type * as taxiXpress from "../taxiXpress.js";
 import type * as telemetry from "../telemetry.js";
@@ -23,7 +25,9 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   apps: typeof apps;
+  auth: typeof auth;
   http: typeof http;
+  identity: typeof identity;
   inspectTelemetry: typeof inspectTelemetry;
   taxiXpress: typeof taxiXpress;
   telemetry: typeof telemetry;

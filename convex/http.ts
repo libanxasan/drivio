@@ -1,6 +1,8 @@
 import { httpRouter } from "convex/server";
-import type { GenericActionCtx, GenericDataModel, UserIdentity } from "convex/server";
-import { apps, belongsToApp } from "./apps";
+import type { GenericActionCtx, GenericDataModel } from "convex/server";
+import { apps } from "./apps";
+import { auth } from "./auth";
+import { principal } from "./identity";
 import { internal } from "./_generated/api";
 import { httpAction } from "./_generated/server";
 import { inspectUpload } from "./inspectTelemetry";
@@ -98,7 +100,7 @@ async function readCompressedBody(request: Request): Promise<ArrayBuffer> {
 }
 
 type Admission = (
-  ctx: GenericActionCtx<GenericDataModel>, identity: UserIdentity,
+  ctx: GenericActionCtx<GenericDataModel>, owner: string,
 ) => Promise<Response | null>;
 
 /**
@@ -106,18 +108,22 @@ type Admission = (
  * `accepts` decides which identities may use the route; `admit` lets an
  * application refuse or throttle before the chunk is read.
  */
-function chunkUpload(accepts: (identity: UserIdentity) => boolean, admit?: Admission) {
+function chunkUpload(app: string | null, admit?: Admission) {
   return httpAction(async (ctx, request) => {
     const identity = await ctx.auth.getUserIdentity();
     if (!identity)
       return Response.json({ message: "Unauthorized" }, { status: 401 });
-    if (!accepts(identity)) {
+    const who = principal(identity);
+    const userApp = who.userId === null
+      ? null
+      : await ctx.runQuery(internal.identity.appOfUser, { userId: who.userId });
+    if (userApp !== app) {
       return Response.json(
         { message: "Use your application's upload route" },
         { status: 403 },
       );
     }
-    if (request.headers.get("x-user-id") !== identity.subject) {
+    if (request.headers.get("x-user-id") !== who.subject) {
       return Response.json(
         { message: "User identifier mismatch" },
         { status: 403 },
@@ -125,7 +131,7 @@ function chunkUpload(accepts: (identity: UserIdentity) => boolean, admit?: Admis
     }
 
     try {
-      const refusal = await admit?.(ctx, identity);
+      const refusal = await admit?.(ctx, who.owner);
       if (refusal) return refusal;
 
       const tripId = requiredHeader(request.headers, "x-trip-id");
@@ -145,7 +151,7 @@ function chunkUpload(accepts: (identity: UserIdentity) => boolean, admit?: Admis
       let receipt;
       try {
         receipt = await ctx.runMutation(internal.telemetry.persist, {
-          owner: identity.tokenIdentifier,
+          owner: who.owner,
           tripId,
           chunk,
           storageId,
@@ -190,19 +196,25 @@ function chunkUpload(accepts: (identity: UserIdentity) => boolean, admit?: Admis
 
 const http = httpRouter();
 
+// Convex Auth: OpenID configuration and the JWKS its tokens are verified with.
+auth.addHttpRoutes(http);
+
 // Core route for DriVio's own clients. Application users must use their route.
 http.route({
   path: "/v1/telemetry/chunks",
   method: "POST",
-  handler: chunkUpload(identity => !belongsToApp(identity)),
+  handler: chunkUpload(null),
 });
 
 for (const app of apps) {
   http.route({
     path: app.archivePath,
     method: "POST",
-    handler: chunkUpload(identity => app.owns(identity), app.admitArchiveUpload),
+    handler: chunkUpload(app.name, app.admitArchiveUpload),
   });
+  for (const route of app.routes) {
+    http.route({ path: route.path, method: "POST", handler: route.handler });
+  }
 }
 
 export default http;

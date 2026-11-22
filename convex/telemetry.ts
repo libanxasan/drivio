@@ -1,5 +1,6 @@
 import { BatchedReplay } from "@convex-dev/batched-replay";
 import { GeospatialIndex } from "@convex-dev/geospatial";
+import { principal } from "./identity";
 import { ConvexError, v } from "convex/values";
 import { components } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
@@ -33,7 +34,7 @@ function findTrip(db: QueryCtx["db"], owner: string, tripId: string) {
 async function requireOwner(ctx: QueryCtx) {
   const identity = await ctx.auth.getUserIdentity();
   if (!identity) throw new ConvexError("Unauthorized");
-  return identity.tokenIdentifier;
+  return principal(identity).owner;
 }
 
 export const persist = internalMutation({
