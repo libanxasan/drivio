@@ -40,7 +40,7 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllEnvs());
 
-describe("Taxi Xpress live data on the shared deployment", () => {
+describe("Taxi Xpress live functions", () => {
   it("accepts only Taxi Xpress tokens", async () => {
     const t = setup();
     await expect(t.query(api.taxiXpress.mine, {})).rejects.toThrow("Sign in");
