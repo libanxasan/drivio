@@ -49,6 +49,15 @@ npm run check && npm test
 npx convex dev --once                           # dev deployment grateful-parakeet-783
 ```
 
-Taxi Xpress needs `TAXI_XPRESS_AUTH_ISSUER` (and optionally `TAXI_XPRESS_AUTH_AUDIENCE`,
-`TAXI_XPRESS_AUTH_JWKS`, `TAXI_XPRESS_OPERATOR_SUBJECTS`) on the deployment. Until the
-issuer is set, its functions treat every caller as signed out.
+Convex refuses to deploy while `auth.config.ts` reads a variable that is not set on
+the deployment, even one with a default in code. Every auth variable must therefore be
+set: `DRIVIO_AUTH_ISSUER`, `DRIVIO_AUTH_ALGORITHM`, `DRIVIO_AUTH_AUDIENCE`,
+`DRIVIO_AUTH_JWKS`, and for Taxi Xpress `TAXI_XPRESS_AUTH_ISSUER`,
+`TAXI_XPRESS_AUTH_AUDIENCE`, `TAXI_XPRESS_AUTH_JWKS`. `TAXI_XPRESS_OPERATOR_SUBJECTS`
+is read at run time and may stay unset.
+
+The dev deployment `grateful-parakeet-783` holds placeholders for both issuers
+(`https://drivio-auth-not-configured.invalid` and
+`https://taxi-xpress-auth-not-configured.invalid/api/auth`, with matching JWKS URLs),
+so no token is accepted yet. Replace them with `npx convex env set` once the auth
+servers are hosted; no redeploy is needed.

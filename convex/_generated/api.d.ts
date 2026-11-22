@@ -11,8 +11,8 @@
 import type * as apps from "../apps.js";
 import type * as http from "../http.js";
 import type * as inspectTelemetry from "../inspectTelemetry.js";
-import type * as telemetry from "../telemetry.js";
 import type * as taxiXpress from "../taxiXpress.js";
+import type * as telemetry from "../telemetry.js";
 import type * as telemetryFormat from "../telemetryFormat.js";
 
 import type {
@@ -25,8 +25,8 @@ declare const fullApi: ApiFromModules<{
   apps: typeof apps;
   http: typeof http;
   inspectTelemetry: typeof inspectTelemetry;
-  telemetry: typeof telemetry;
   taxiXpress: typeof taxiXpress;
+  telemetry: typeof telemetry;
   telemetryFormat: typeof telemetryFormat;
 }>;
 
